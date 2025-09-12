@@ -1,0 +1,25 @@
+server:
+  port: 8080
+  host: '0.0.0.0'
+
+brokers:
+  - name: binance
+    type: websocket
+    url: 'wss://stream.binance.com:9443'
+    auth: none
+    enabled: true
+  - name: oanda
+    type: http-stream
+    url: 'https://stream-fxpractice.oanda.com'  # Use practice server for testing
+    auth: bearer
+    enabled: true
+    apiKey: ''
+    accountId: ''
+
+logging:
+  level: 'info'
+
+redis:
+  enabled: false
+  host: 'localhost'
+  port: 6379
