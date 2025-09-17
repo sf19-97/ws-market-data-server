@@ -6,6 +6,8 @@ export class OandaBroker extends BaseBroker {
   private streamConnection?: any;
   private apiKey: string;
   private accountId: string;
+  private reconnectTimeout?: NodeJS.Timeout;
+  private isReconnecting: boolean = false;
 
   constructor(config: BrokerConfig) {
     super(config);
@@ -70,8 +72,16 @@ export class OandaBroker extends BaseBroker {
       });
 
       this.streamConnection.on("error", (err: Error) => {
+        console.error("Oanda stream error:", err.message);
         this.emitError(new Error(`Oanda stream error: ${err}`));
         this.connected = false;
+        this.handleReconnect();
+      });
+      
+      this.streamConnection.on("end", () => {
+        console.log("Oanda stream ended");
+        this.connected = false;
+        this.handleReconnect();
       });
 
       console.log("Oanda broker connected");
@@ -81,11 +91,39 @@ export class OandaBroker extends BaseBroker {
   }
 
   async disconnect(): Promise<void> {
+    this.clearReconnectTimeout();
     if (this.streamConnection) {
       this.streamConnection.destroy();
       this.streamConnection = undefined;
     }
     this.connected = false;
+  }
+  
+  private handleReconnect(): void {
+    if (this.isReconnecting || !this.subscriptions.size) return;
+    
+    this.clearReconnectTimeout();
+    this.isReconnecting = true;
+    
+    console.log("OANDA: Scheduling reconnect in 5 seconds...");
+    this.reconnectTimeout = setTimeout(async () => {
+      try {
+        console.log("OANDA: Attempting to reconnect...");
+        await this.connect();
+        this.isReconnecting = false;
+      } catch (err) {
+        console.error("OANDA: Reconnection failed:", err);
+        this.isReconnecting = false;
+        this.handleReconnect(); // Try again
+      }
+    }, 5000);
+  }
+  
+  private clearReconnectTimeout(): void {
+    if (this.reconnectTimeout) {
+      clearTimeout(this.reconnectTimeout);
+      this.reconnectTimeout = undefined;
+    }
   }
 
   async subscribe(symbols: string[]): Promise<void> {

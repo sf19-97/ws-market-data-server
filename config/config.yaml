@@ -15,6 +15,11 @@ brokers:
     enabled: true
     apiKey: ''
     accountId: ''
+  - name: kraken
+    type: websocket
+    url: 'wss://ws.kraken.com'
+    auth: none
+    enabled: true
 
 logging:
   level: 'info'

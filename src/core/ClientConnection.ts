@@ -20,10 +20,12 @@ export class ClientConnection extends EventEmitter {
 
   private setupHandlers(): void {
     this.ws.on("message", (data: Buffer) => {
+      console.log(`Client ${this.id} raw message:`, data.toString());
       try {
         const message: ClientMessage = JSON.parse(data.toString());
         this.handleMessage(message);
       } catch (err) {
+        console.error(`Client ${this.id} parse error:`, err);
         this.sendError(`Invalid message format: ${err}`);
       }
     });

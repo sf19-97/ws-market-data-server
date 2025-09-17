@@ -4,6 +4,7 @@ import { BinanceBroker } from "../brokers/BinanceBroker.js";
 import { MockBinanceBroker } from "../brokers/MockBinanceBroker.js";
 import { OandaBroker } from "../brokers/OandaBroker.js";
 import { MockOandaBroker } from "../brokers/MockOandaBroker.js";
+import { KrakenBroker } from "../brokers/KrakenBroker.js";
 import { BrokerConfig, MarketData } from "../types/index.js";
 
 export class BrokerManager extends EventEmitter {
@@ -24,6 +25,9 @@ export class BrokerManager extends EventEmitter {
       case "oanda":
         // Use real broker with API credentials
         broker = new OandaBroker(config);
+        break;
+      case "kraken":
+        broker = new KrakenBroker(config);
         break;
       default:
         console.warn(`Unknown broker type: ${config.name}`);
@@ -71,6 +75,9 @@ export class BrokerManager extends EventEmitter {
       case "oanda":
         // Use real broker with API credentials
         broker = new OandaBroker(config);
+        break;
+      case "kraken":
+        broker = new KrakenBroker(config);
         break;
       default:
         throw new Error(`Unknown broker type: ${brokerName}`);
