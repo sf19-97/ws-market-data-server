@@ -49,7 +49,7 @@ class MarketDataServer {
   }
 
   private setupHttpEndpoints(): void {
-    this.app.get("/health", (req, res) => {
+    this.app.get("/health", (_, res) => {
       res.json({
         status: "healthy",
         clients: this.clients.size,
@@ -57,7 +57,7 @@ class MarketDataServer {
       });
     });
 
-    this.app.get("/metrics", (req, res) => {
+    this.app.get("/metrics", (_, res) => {
       res.json({
         connections: this.clients.size,
         subscriptions: Array.from(this.clients.values())
@@ -87,7 +87,7 @@ class MarketDataServer {
   }
 
   private setupWebSocketServer(): void {
-    this.wss.on("connection", (ws, req) => {
+    this.wss.on("connection", (ws) => {
       const clientId = this.generateClientId();
       const client = new ClientConnection(ws, clientId);
       

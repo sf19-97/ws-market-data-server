@@ -1,6 +1,6 @@
 import WebSocket from "ws";
 import { BaseBroker } from "./BaseBroker.js";
-import { MarketData, BrokerConfig } from "../types/index.js";
+import { MarketData } from "../types/index.js";
 
 export class BinanceBroker extends BaseBroker {
   private ws?: WebSocket;

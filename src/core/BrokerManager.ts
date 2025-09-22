@@ -1,9 +1,7 @@
 import { EventEmitter } from "events";
 import { BaseBroker } from "../brokers/BaseBroker.js";
-import { BinanceBroker } from "../brokers/BinanceBroker.js";
 import { MockBinanceBroker } from "../brokers/MockBinanceBroker.js";
 import { OandaBroker } from "../brokers/OandaBroker.js";
-import { MockOandaBroker } from "../brokers/MockOandaBroker.js";
 import { KrakenBroker } from "../brokers/KrakenBroker.js";
 import { BrokerConfig, MarketData } from "../types/index.js";
 
@@ -133,7 +131,7 @@ export class BrokerManager extends EventEmitter {
       }
     } else {
       // Unsubscribe from all brokers
-      for (const [brokerName, brokerInstance] of this.globalBrokers) {
+      for (const [, brokerInstance] of this.globalBrokers) {
         await brokerInstance.unsubscribe(symbols);
       }
       symbols.forEach(s => this.symbolToBroker.delete(s));

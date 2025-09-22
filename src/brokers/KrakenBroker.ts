@@ -1,6 +1,6 @@
 import WebSocket from "ws";
 import { BaseBroker } from "./BaseBroker.js";
-import { MarketData, BrokerConfig } from "../types/index.js";
+import { MarketData } from "../types/index.js";
 
 export class KrakenBroker extends BaseBroker {
   private ws?: WebSocket;
@@ -105,7 +105,7 @@ export class KrakenBroker extends BaseBroker {
       }
     } else if (Array.isArray(msg) && msg.length >= 4) {
       // Ticker updates: [channelID, tickerData, "ticker", pair]
-      const [channelID, tickerData, type, pair] = msg;
+      const [, tickerData, type, pair] = msg;
       
       if (type === "ticker" && tickerData) {
         const symbol = this.denormalizeSymbol(pair);

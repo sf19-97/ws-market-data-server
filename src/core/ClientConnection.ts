@@ -6,7 +6,6 @@ export class ClientConnection extends EventEmitter {
   private ws: WebSocket;
   private id: string;
   private subscriptions: Set<string> = new Set();
-  private authenticated: boolean = false;
   private brokerCredentials: Map<string, any> = new Map();
 
   constructor(ws: WebSocket, id: string) {
@@ -84,7 +83,6 @@ export class ClientConnection extends EventEmitter {
       case "auth":
         // Simple auth check - extend as needed
         if (message.auth) {
-          this.authenticated = true;
           this.sendStatus("Authenticated successfully");
         } else {
           this.sendError("Invalid authentication");
