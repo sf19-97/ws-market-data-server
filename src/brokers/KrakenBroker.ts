@@ -13,9 +13,20 @@ export class KrakenBroker extends BaseBroker {
       const url = this.config.url || 'wss://ws.kraken.com';
       
       console.log(`Connecting to Kraken WebSocket: ${url}`);
-      this.ws = new WebSocket(url);
+      
+      const timeout = setTimeout(() => {
+        reject(new Error('Kraken connection timeout after 10 seconds'));
+        this.ws?.close();
+      }, 10000);
+      
+      this.ws = new WebSocket(url, {
+        headers: {
+          'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
+        }
+      });
 
       this.ws.on("open", () => {
+        clearTimeout(timeout);
         this.connected = true;
         console.log("Kraken broker connected");
         this.startPingInterval();
@@ -32,7 +43,13 @@ export class KrakenBroker extends BaseBroker {
       });
 
       this.ws.on("error", (err) => {
+        clearTimeout(timeout);
         console.error("Kraken WebSocket error:", err);
+        console.error("Error details:", {
+          message: err.message,
+          code: (err as any).code,
+          statusCode: (err as any).statusCode
+        });
         reject(err);
       });
 
@@ -95,6 +112,8 @@ export class KrakenBroker extends BaseBroker {
   }
 
   private handleMessage(msg: any): void {
+    console.log("Kraken message received:", JSON.stringify(msg, null, 2));
+    
     // Kraken sends different message types
     if (msg.event === "systemStatus") {
       console.log("Kraken system status:", msg.status);
@@ -108,7 +127,7 @@ export class KrakenBroker extends BaseBroker {
       const [, tickerData, type, pair] = msg;
       
       if (type === "ticker" && tickerData) {
-        const symbol = this.denormalizeSymbol(pair);
+        // Keep the symbol as-is (XBT/USD) to match client subscriptions
         
         // Kraken ticker format: https://docs.kraken.com/websockets/#message-ticker
         // a = ask [price, wholeLotVolume, lotVolume]
@@ -118,7 +137,7 @@ export class KrakenBroker extends BaseBroker {
         
         const marketData: MarketData = {
           broker: "kraken",
-          symbol: symbol,
+          symbol: pair,
           type: "tick",
           timestamp: Date.now(),
           data: {

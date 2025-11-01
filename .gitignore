@@ -7,3 +7,4 @@ dist/
 server.log
 test-output.log
 .DS_Store
+test-*.js

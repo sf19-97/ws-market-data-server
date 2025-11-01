@@ -1,0 +1,17 @@
+services:
+  - type: web
+    name: ws-market-data-server
+    runtime: docker
+    repo: https://github.com/YOUR_USERNAME/ws-market-data-server
+    region: oregon
+    plan: free
+    dockerfilePath: ./Dockerfile
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: PORT
+        value: 8080
+      - key: OANDA_API_KEY
+        sync: false
+      - key: OANDA_ACCOUNT_ID
+        sync: false
