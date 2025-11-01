@@ -177,17 +177,6 @@ export class KrakenBroker extends BaseBroker {
     return normalized;
   }
 
-  private denormalizeSymbol(symbol: string): string {
-    // Convert XBT/USD back to BTCUSD
-    let denormalized = symbol.replace('/', '_');
-    
-    // Convert XBT back to BTC
-    if (denormalized.startsWith('XBT')) {
-      denormalized = denormalized.replace('XBT', 'BTC');
-    }
-    
-    return denormalized;
-  }
 
   private handleReconnect(): void {
     if (!this.reconnectTimeout && this.subscriptions.size > 0) {
