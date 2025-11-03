@@ -1,10 +1,13 @@
 import { WebSocketServer } from "ws";
 import { createServer } from "http";
 import express from "express";
+import cors from "cors";
 import { BrokerManager } from "./core/BrokerManager.js";
 import { ClientConnection } from "./core/ClientConnection.js";
 import { MarketData } from "./types/index.js";
 import { loadConfig } from "./utils/config.js";
+import { testConnection } from "./utils/database.js";
+import { CandlesService } from "./services/candlesService.js";
 import pino from "pino";
 import dotenv from "dotenv";
 
@@ -32,7 +35,15 @@ class MarketDataServer {
     // Load configuration
     this.config = await loadConfig();
     
-    // Setup HTTP endpoints for health checks
+    // Test database connection
+    try {
+      await testConnection();
+    } catch (error: any) {
+      logger.error('Failed to connect to database:', error);
+      process.exit(1);
+    }
+    
+    // Setup HTTP endpoints
     this.setupHttpEndpoints();
     
     // Initialize brokers
@@ -49,6 +60,13 @@ class MarketDataServer {
   }
 
   private setupHttpEndpoints(): void {
+    // Enable CORS for all routes
+    this.app.use(cors());
+    
+    // Parse JSON bodies
+    this.app.use(express.json());
+    
+    // Health check endpoint
     this.app.get("/health", (_, res) => {
       res.json({
         status: "healthy",
@@ -57,12 +75,69 @@ class MarketDataServer {
       });
     });
 
+    // Metrics endpoint
     this.app.get("/metrics", (_, res) => {
       res.json({
         connections: this.clients.size,
         subscriptions: Array.from(this.clients.values())
           .reduce((acc, client) => acc + client.getSubscriptions().length, 0)
       });
+    });
+
+    // Candles API endpoint
+    this.app.get("/api/candles", async (req, res) => {
+      try {
+        const { symbol, timeframe, from, to } = req.query;
+
+        // Validate required parameters
+        if (!symbol || !timeframe || !from || !to) {
+          res.status(400).json({
+            error: "Missing required parameters: symbol, timeframe, from, to"
+          });
+          return;
+        }
+
+        // Validate timeframe
+        if (!CandlesService.validateTimeframe(timeframe as string)) {
+          res.status(400).json({
+            error: "Invalid timeframe. Must be one of: 1m, 5m, 15m, 1h, 4h, 12h"
+          });
+          return;
+        }
+
+        // Parse timestamps
+        const fromTimestamp = parseInt(from as string);
+        const toTimestamp = parseInt(to as string);
+
+        if (isNaN(fromTimestamp) || isNaN(toTimestamp)) {
+          res.status(400).json({
+            error: "Invalid timestamp format. Must be Unix timestamp in seconds"
+          });
+          return;
+        }
+
+        if (fromTimestamp >= toTimestamp) {
+          res.status(400).json({
+            error: "From timestamp must be less than to timestamp"
+          });
+          return;
+        }
+
+        // Fetch candle data
+        const candles = await CandlesService.getCandles(
+          symbol as string,
+          timeframe as string,
+          fromTimestamp,
+          toTimestamp
+        );
+
+        res.json(candles);
+      } catch (error: any) {
+        logger.error('Candles API error:', error);
+        res.status(500).json({
+          error: "Internal server error"
+        });
+      }
     });
   }
 
@@ -136,7 +211,7 @@ class MarketDataServer {
   }
 
   private generateClientId(): string {
-    return `client_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
+    return `client_${Date.now()}_${Math.random().toString(36).substring(2, 11)}`;
   }
 
   async stop(): Promise<void> {
