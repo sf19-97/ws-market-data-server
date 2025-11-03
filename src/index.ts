@@ -43,7 +43,14 @@ class MarketDataServer {
     }
     
     // Setup HTTP endpoints
-    this.setupHttpEndpoints();
+    console.log('About to setup HTTP endpoints...');
+    try {
+      this.setupHttpEndpoints();
+      console.log('HTTP endpoints setup completed successfully');
+    } catch (error) {
+      console.error('CRITICAL: HTTP endpoints setup failed:', error);
+      throw error;
+    }
     
     // Initialize brokers
     await this.initializeBrokers();
