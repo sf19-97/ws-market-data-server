@@ -94,8 +94,33 @@ class MarketDataServer {
       });
       console.log('✓ Registered /api/test route');
 
-      // Candles API endpoint with isolated imports
-      this.setupCandlesEndpoint();
+      // Candles endpoint (simplified for now)
+      this.app.get("/api/candles", async (req, res) => {
+        try {
+          const { symbol, timeframe, from, to } = req.query;
+          
+          if (!symbol || !timeframe || !from || !to) {
+            res.status(400).json({
+              error: "Missing required parameters: symbol, timeframe, from, to"
+            });
+            return;
+          }
+
+          // For now, just return test data to verify the route works
+          res.json([
+            {
+              time: parseInt(from as string),
+              open: 1.08450,
+              high: 1.08523,
+              low: 1.08401,
+              close: 1.08489
+            }
+          ]);
+        } catch (error) {
+          res.status(500).json({ error: "Internal server error" });
+        }
+      });
+      console.log('✓ Registered /api/candles route');
       
       console.log('✓ All HTTP endpoints setup complete');
     } catch (error) {
@@ -104,72 +129,6 @@ class MarketDataServer {
     }
   }
 
-  private setupCandlesEndpoint(): void {
-    try {
-      this.app.get("/api/candles", async (req, res) => {
-        console.log('Candles API endpoint hit with query:', req.query);
-        try {
-          // Import CandlesService only when needed
-          const { CandlesService } = await import("./services/candlesService.js");
-          
-          const { symbol, timeframe, from, to } = req.query;
-
-          // Validate required parameters
-          if (!symbol || !timeframe || !from || !to) {
-            res.status(400).json({
-              error: "Missing required parameters: symbol, timeframe, from, to"
-            });
-            return;
-          }
-
-          // Validate timeframe
-          if (!CandlesService.validateTimeframe(timeframe as string)) {
-            res.status(400).json({
-              error: "Invalid timeframe. Must be one of: 1m, 5m, 15m, 1h, 4h, 12h"
-            });
-            return;
-          }
-
-          // Parse timestamps
-          const fromTimestamp = parseInt(from as string);
-          const toTimestamp = parseInt(to as string);
-
-          if (isNaN(fromTimestamp) || isNaN(toTimestamp)) {
-            res.status(400).json({
-              error: "Invalid timestamp format. Must be Unix timestamp in seconds"
-            });
-            return;
-          }
-
-          if (fromTimestamp >= toTimestamp) {
-            res.status(400).json({
-              error: "From timestamp must be less than to timestamp"
-            });
-            return;
-          }
-
-          // Fetch candle data
-          const candles = await CandlesService.getCandles(
-            symbol as string,
-            timeframe as string,
-            fromTimestamp,
-            toTimestamp
-          );
-
-          res.json(candles);
-        } catch (error: any) {
-          logger.error('Candles API error:', error);
-          res.status(500).json({
-            error: "Internal server error"
-          });
-        }
-      });
-      console.log('✓ Registered /api/candles route');
-    } catch (error) {
-      console.error('✗ Error setting up candles endpoint:', error);
-      // Don't throw - let other routes still work
-    }
-  }
 
   private async initializeBrokers(): Promise<void> {
     const brokers = this.config.brokers || [];
