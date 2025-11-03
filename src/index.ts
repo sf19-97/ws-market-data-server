@@ -95,14 +95,8 @@ class MarketDataServer {
       });
       console.log('✓ Registered /metrics route');
 
-      // Test endpoint (moved to root level)
-      this.app.get("/test", (_, res) => {
-        res.json({ message: "Root level routes work!" });
-      });
-      console.log('✓ Registered /test route');
-
-      // Candles endpoint (moved to root level with real database query)
-      this.app.get("/candles", async (req, res) => {
+      // Candles API endpoint
+      this.app.get("/api/candles", async (req, res) => {
         try {
           const { symbol, timeframe = '1h', from, to } = req.query;
           
@@ -160,7 +154,7 @@ class MarketDataServer {
           res.status(500).json({ error: "Internal server error" });
         }
       });
-      console.log('✓ Registered /candles route');
+      console.log('✓ Registered /api/candles route');
       
       console.log('✓ All HTTP endpoints setup complete');
     } catch (error) {
