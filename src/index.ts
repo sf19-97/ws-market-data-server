@@ -84,8 +84,14 @@ class MarketDataServer {
       });
     });
 
+    // Test endpoint
+    this.app.get("/api/test", (_, res) => {
+      res.json({ message: "API routes are working!" });
+    });
+
     // Candles API endpoint
     this.app.get("/api/candles", async (req, res) => {
+      console.log('Candles API endpoint hit with query:', req.query);
       try {
         const { symbol, timeframe, from, to } = req.query;
 
