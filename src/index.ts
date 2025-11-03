@@ -78,8 +78,61 @@ class MarketDataServer {
       });
       console.log('✓ Registered /health route');
 
-      // Metrics endpoint
-      this.app.get("/metrics", (_, res) => {
+      // Metrics endpoint (temporarily includes candles query)
+      this.app.get("/metrics", async (req, res) => {
+        if (req.query.symbol) {
+          // Temporary candles functionality in metrics endpoint
+          try {
+            const { getPool } = await import("./utils/database.js");
+            const { symbol, timeframe = '1h', from, to } = req.query;
+            
+            const timeframeMap: Record<string, string> = {
+              '1m': '1 minute', '5m': '5 minutes', '15m': '15 minutes',
+              '1h': '1 hour', '4h': '4 hours', '12h': '12 hours'
+            };
+            
+            const interval = timeframeMap[timeframe as string] || '1 hour';
+            const pool = getPool();
+            
+            const query = `
+              SELECT
+                EXTRACT(EPOCH FROM time_bucket($1, time))::bigint AS time,
+                (array_agg(mid_price ORDER BY time ASC))[1] AS open,
+                MAX(mid_price) AS high,
+                MIN(mid_price) AS low,
+                (array_agg(mid_price ORDER BY time DESC))[1] AS close
+              FROM forex_ticks
+              WHERE symbol = $2
+                AND time >= to_timestamp($3)
+                AND time <= to_timestamp($4)
+              GROUP BY time_bucket($1, time)
+              ORDER BY time ASC;
+            `;
+            
+            const result = await pool.query(query, [
+              interval,
+              symbol,
+              parseInt(from as string),
+              parseInt(to as string)
+            ]);
+            
+            const candles = result.rows.map(row => ({
+              time: parseInt(row.time),
+              open: parseFloat(parseFloat(row.open).toFixed(5)),
+              high: parseFloat(parseFloat(row.high).toFixed(5)),
+              low: parseFloat(parseFloat(row.low).toFixed(5)),
+              close: parseFloat(parseFloat(row.close).toFixed(5))
+            }));
+            
+            res.json(candles);
+            return;
+          } catch (error) {
+            res.status(500).json({ error: "Database query failed" });
+            return;
+          }
+        }
+        
+        // Normal metrics response
         res.json({
           connections: this.clients.size,
           subscriptions: Array.from(this.clients.values())
