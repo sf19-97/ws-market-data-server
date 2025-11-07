@@ -2,6 +2,7 @@ import { WebSocketServer } from "ws";
 import { createServer } from "http";
 import express from "express";
 import cors from "cors";
+import crypto from "crypto";
 import { BrokerManager } from "./core/BrokerManager.js";
 import { ClientConnection } from "./core/ClientConnection.js";
 import { MarketData } from "./types/index.js";
@@ -65,6 +66,24 @@ class MarketDataServer {
     });
   }
 
+  private getCacheDuration(timeframe: string): number {
+    switch(timeframe) {
+      case '1m':
+        return 60;    // 1 minute
+      case '5m':
+        return 300;   // 5 minutes
+      case '15m':
+        return 600;   // 10 minutes
+      case '1h':
+        return 1800;  // 30 minutes
+      case '4h':
+      case '12h':
+        return 3600;  // 1 hour
+      default:
+        return 600;   // 10 minutes default
+    }
+  }
+
   private setupHttpEndpoints(): void {
     try {
       console.log('Setting up HTTP endpoints...');
@@ -96,14 +115,24 @@ class MarketDataServer {
       console.log('✓ Registered /metrics route');
 
       // Candles API endpoint
-      this.app.get("/api/candles", async (req, res) => {
+      this.app.get("/api/candles", async (req, res): Promise<void> => {
         try {
           const { symbol, timeframe = '1h', from, to } = req.query;
-          
+
           if (!symbol || !from || !to) {
             res.status(400).json({
               error: "Missing required parameters: symbol, from, to"
             });
+            return;
+          }
+
+          // Generate a cache key for ETag
+          const cacheKey = `${symbol}-${timeframe}-${from}-${to}`;
+          const etag = crypto.createHash('md5').update(cacheKey).digest('hex');
+
+          // Check if client has valid cache
+          if (req.headers['if-none-match'] === etag) {
+            res.status(304).end(); // Not Modified
             return;
           }
 
@@ -147,7 +176,15 @@ class MarketDataServer {
             low: parseFloat(parseFloat(row.low).toFixed(5)),
             close: parseFloat(parseFloat(row.close).toFixed(5))
           }));
-          
+
+          // Set cache headers
+          res.set({
+            'Cache-Control': `public, max-age=${this.getCacheDuration(timeframe as string)}`,
+            'ETag': etag,
+            'Vary': 'Accept-Encoding', // Important for CDNs
+            'Last-Modified': new Date().toUTCString()
+          });
+
           res.json(candles);
         } catch (error) {
           console.error('Candles endpoint error:', error);
