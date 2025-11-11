@@ -8,3 +8,6 @@ server.log
 test-output.log
 .DS_Store
 test-*.js
+
+# Dukascopy cache (don't commit 21MB+ of cached data)
+.dukascopy-cache/

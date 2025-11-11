@@ -114,6 +114,78 @@ class MarketDataServer {
       });
       console.log('✓ Registered /metrics route');
 
+      // Metadata API endpoint - discover available symbols and date ranges
+      this.app.get("/api/metadata", async (req, res): Promise<void> => {
+        try {
+          const { symbol } = req.query;
+
+          // Import database
+          const { getPool } = await import("./utils/database.js");
+          const pool = getPool();
+
+          if (symbol) {
+            // Get metadata for a specific symbol
+            const normalizedSymbol = (symbol as string).replace('/', '');
+
+            const result = await pool.query(`
+              SELECT
+                symbol,
+                MIN(time) as earliest,
+                MAX(time) as latest,
+                COUNT(*) as tick_count
+              FROM market_ticks
+              WHERE symbol = $1
+              GROUP BY symbol
+            `, [normalizedSymbol]);
+
+            if (result.rows.length === 0) {
+              res.status(404).json({
+                error: "Symbol not found",
+                symbol: normalizedSymbol
+              });
+              return;
+            }
+
+            const row = result.rows[0];
+            res.json({
+              symbol: row.symbol,
+              earliest: Math.floor(new Date(row.earliest).getTime() / 1000),
+              latest: Math.floor(new Date(row.latest).getTime() / 1000),
+              tick_count: parseInt(row.tick_count),
+              timeframes: ['1m', '5m', '15m', '1h', '4h', '12h']
+            });
+          } else {
+            // Get list of all available symbols with their date ranges
+            const result = await pool.query(`
+              SELECT
+                symbol,
+                MIN(time) as earliest,
+                MAX(time) as latest,
+                COUNT(*) as tick_count
+              FROM market_ticks
+              GROUP BY symbol
+              ORDER BY symbol
+            `);
+
+            const symbols = result.rows.map(row => ({
+              symbol: row.symbol,
+              earliest: Math.floor(new Date(row.earliest).getTime() / 1000),
+              latest: Math.floor(new Date(row.latest).getTime() / 1000),
+              tick_count: parseInt(row.tick_count)
+            }));
+
+            res.json({
+              symbols,
+              timeframes: ['1m', '5m', '15m', '1h', '4h', '12h']
+            });
+          }
+        } catch (error) {
+          console.error('Metadata endpoint error:', error);
+          res.status(500).json({ error: "Internal server error" });
+        }
+      });
+      console.log('✓ Registered /api/metadata route');
+
       // Candles API endpoint
       this.app.get("/api/candles", async (req, res): Promise<void> => {
         try {
@@ -191,7 +263,7 @@ class MarketDataServer {
                 MAX(mid_price) AS high,
                 MIN(mid_price) AS low,
                 (array_agg(mid_price ORDER BY time DESC))[1] AS close
-              FROM forex_ticks
+              FROM market_ticks
               WHERE symbol = $2
                 AND time >= to_timestamp($3)
                 AND time <= to_timestamp($4)
