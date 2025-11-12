@@ -174,6 +174,23 @@ class MarketDataServer {
       );
       logger.debug('Registered /api/metadata route');
 
+      // Metadata API endpoint - path parameter version for compatibility
+      this.app.get("/api/metadata/:symbol",
+        apiLimiter,
+        asyncHandler(async (req, res): Promise<void> => {
+          const { symbol } = req.params;
+          const normalizedSymbol = sanitizeSymbol(symbol);
+          const metadata = await this.metadataService.getSymbolMetadata(normalizedSymbol);
+
+          if (!metadata) {
+            throw new ApiError(404, "Symbol not found", "SYMBOL_NOT_FOUND");
+          }
+
+          res.json(metadata);
+        })
+      );
+      logger.debug('Registered /api/metadata/:symbol route');
+
       // Candles API endpoint
       this.app.get("/api/candles",
         strictLimiter,
@@ -243,6 +260,90 @@ class MarketDataServer {
         })
       );
       logger.debug('Registered /api/candles route');
+
+      // Candles API endpoint - path parameter version for compatibility
+      this.app.get("/api/candles/:symbol/:timeframe",
+        strictLimiter,
+        asyncHandler(async (req, res): Promise<void> => {
+          const { symbol, timeframe } = req.params;
+          const { from, to } = req.query as { from?: string; to?: string };
+
+          // Validate required query parameters
+          if (!from || !to) {
+            throw new ApiError(
+              400,
+              "Missing required query parameters: 'from' and 'to' (Unix timestamps in seconds)",
+              'MISSING_PARAMETERS'
+            );
+          }
+
+          const normalizedSymbol = sanitizeSymbol(symbol);
+          const fromTimestamp = parseInt(from);
+          const toTimestamp = parseInt(to);
+
+          // Validate timeframe
+          if (!['1m', '5m', '15m', '1h', '4h', '12h'].includes(timeframe)) {
+            throw new ApiError(
+              400,
+              `Invalid timeframe '${timeframe}'. Must be one of: 1m, 5m, 15m, 1h, 4h, 12h`,
+              'INVALID_TIMEFRAME'
+            );
+          }
+
+          // Check if symbol exists
+          const symbolExists = await this.metadataService.symbolExists(normalizedSymbol);
+          if (!symbolExists) {
+            throw new ApiError(
+              404,
+              `Symbol '${normalizedSymbol}' not found in database`,
+              'SYMBOL_NOT_FOUND'
+            );
+          }
+
+          // Get available date range
+          const dateRange = await this.metadataService.getSymbolDateRange(normalizedSymbol);
+
+          // Generate ETag for caching
+          const cacheKey = `${normalizedSymbol}-${timeframe}-${fromTimestamp}-${toTimestamp}`;
+          const etag = crypto.createHash('md5').update(cacheKey).digest('hex');
+
+          // Check client cache
+          if (req.headers['if-none-match'] === etag) {
+            res.status(304).end();
+            return;
+          }
+
+          // Fetch candles
+          const candles = await this.candlesService.getCandles(
+            normalizedSymbol,
+            timeframe as Timeframe,
+            fromTimestamp,
+            toTimestamp
+          );
+
+          // Set cache headers
+          const cacheDuration = CACHE_DURATIONS[timeframe as Timeframe] || CACHE_DURATIONS.default;
+          res.set({
+            'Cache-Control': `public, max-age=${cacheDuration}`,
+            'ETag': etag,
+            'Vary': 'Accept-Encoding',
+            'Last-Modified': new Date().toUTCString()
+          });
+
+          // Add helpful headers when no data
+          if (candles.length === 0 && dateRange) {
+            res.set({
+              'X-Data-Available': 'false',
+              'X-Available-From': new Date(dateRange.earliest * 1000).toISOString(),
+              'X-Available-To': new Date(dateRange.latest * 1000).toISOString(),
+              'Warning': '199 - "No data available for requested date range. Check X-Available-From and X-Available-To headers."'
+            });
+          }
+
+          res.json(candles);
+        })
+      );
+      logger.debug('Registered /api/candles/:symbol/:timeframe route');
 
       // Error handling middleware (must be last)
       this.app.use(notFoundHandler);
