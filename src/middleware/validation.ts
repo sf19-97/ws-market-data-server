@@ -89,10 +89,13 @@ export function validateQuery<T extends z.ZodType>(schema: T) {
   return (req: Request, res: Response, next: NextFunction): void => {
     try {
       const validated = schema.parse(req.query);
-      // Attach validated data to a new property instead of overwriting req.query
-      (req as any).validatedQuery = validated;
-      // Also merge back to query for compatibility
-      Object.assign(req.query, validated);
+      // Replace req.query with validated data (req.query is read-only, so use defineProperty)
+      Object.defineProperty(req, 'query', {
+        value: validated,
+        writable: true,
+        enumerable: true,
+        configurable: true
+      });
       next();
     } catch (error) {
       if (error instanceof z.ZodError) {
