@@ -1,18 +1,20 @@
 import WebSocket from "ws";
 import { EventEmitter } from "events";
 import { ClientMessage, ServerMessage, MarketData } from "../types/index.js";
+import { WS_HEARTBEAT_INTERVAL } from "../utils/constants.js";
 
 export class ClientConnection extends EventEmitter {
   private ws: WebSocket;
   private id: string;
   private subscriptions: Set<string> = new Set();
   private brokerCredentials: Map<string, any> = new Map();
+  private heartbeatInterval?: NodeJS.Timeout;
 
   constructor(ws: WebSocket, id: string) {
     super();
     this.ws = ws;
     this.id = id;
-    
+
     this.setupHandlers();
     this.sendStatus("Connected to Market Data Server");
   }
@@ -30,6 +32,7 @@ export class ClientConnection extends EventEmitter {
     });
 
     this.ws.on("close", () => {
+      this.cleanup();
       this.emit("disconnect", this.id);
     });
 
@@ -37,14 +40,22 @@ export class ClientConnection extends EventEmitter {
       console.error(`Client ${this.id} error:`, err);
     });
 
-    // Send heartbeat
-    const heartbeat = setInterval(() => {
+    // Setup heartbeat with proper cleanup
+    this.heartbeatInterval = setInterval(() => {
       if (this.ws.readyState === WebSocket.OPEN) {
         this.ws.ping();
-      } else {
-        clearInterval(heartbeat);
       }
-    }, 30000);
+    }, WS_HEARTBEAT_INTERVAL);
+  }
+
+  /**
+   * Cleanup resources to prevent memory leaks
+   */
+  private cleanup(): void {
+    if (this.heartbeatInterval) {
+      clearInterval(this.heartbeatInterval);
+      this.heartbeatInterval = undefined;
+    }
   }
 
   private handleMessage(message: ClientMessage): void {
@@ -160,6 +171,7 @@ export class ClientConnection extends EventEmitter {
   }
 
   disconnect(): void {
+    this.cleanup();
     this.ws.close();
   }
 

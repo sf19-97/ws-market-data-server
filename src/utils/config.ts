@@ -1,12 +1,17 @@
 import { readFileSync, existsSync } from "fs";
 import { parse } from "yaml";
 import { join } from "path";
+import { ServerConfig } from "../types/index.js";
+import { createLogger } from "./logger.js";
+import { DEFAULT_BROKER_CONFIGS, DEFAULT_SERVER_CONFIG } from "./constants.js";
 
-export async function loadConfig(): Promise<any> {
+const logger = createLogger();
+
+export async function loadConfig(): Promise<ServerConfig> {
   const configPath = join(process.cwd(), "config", "config.yaml");
-  
+
   if (!existsSync(configPath)) {
-    console.log("No config.yaml found, using default configuration");
+    logger.info('No config.yaml found, using default configuration');
     return getDefaultConfig();
   }
 
@@ -15,38 +20,17 @@ export async function loadConfig(): Promise<any> {
     const config = parse(configFile);
     return config;
   } catch (err) {
-    console.error("Failed to load config:", err);
+    logger.error({ err }, 'Failed to load config');
     return getDefaultConfig();
   }
 }
 
-function getDefaultConfig(): any {
+function getDefaultConfig(): ServerConfig {
   return {
-    server: {
-      port: 8080,
-      maxConnections: 10000,
-      heartbeatInterval: "30s"
-    },
+    server: DEFAULT_SERVER_CONFIG,
     brokers: [
-      {
-        name: "binance",
-        type: "websocket",
-        url: "wss://stream.binance.com:9443",
-        auth: "none",
-        enabled: true
-      },
-      {
-        name: "oanda",
-        type: "http-stream",
-        url: "https://stream-fxpractice.oanda.com",
-        auth: "bearer",
-        enabled: false // Disabled by default, needs API key
-      }
-    ],
-    clients: {
-      authRequired: false,
-      rateLimit: "100/s",
-      maxSubscriptions: 50
-    }
+      DEFAULT_BROKER_CONFIGS.binance,
+      DEFAULT_BROKER_CONFIGS.oanda
+    ]
   };
 }

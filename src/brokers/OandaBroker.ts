@@ -1,9 +1,13 @@
 import axios from "axios";
+import { IncomingMessage } from "http";
 import { BaseBroker } from "./BaseBroker.js";
 import { MarketData, BrokerConfig } from "../types/index.js";
+import { createLogger } from "../utils/logger.js";
+
+const logger = createLogger();
 
 export class OandaBroker extends BaseBroker {
-  private streamConnection?: any;
+  private streamConnection?: IncomingMessage;
   private apiKey: string;
   private accountId: string;
   private reconnectTimeout?: NodeJS.Timeout;
@@ -27,7 +31,7 @@ export class OandaBroker extends BaseBroker {
 
     // Skip connection if no instruments subscribed yet
     if (this.subscriptions.size === 0) {
-      console.log("Oanda broker initialized, waiting for subscriptions");
+      logger.info('OANDA broker initialized, waiting for subscriptions');
       return;
     }
 
@@ -49,9 +53,10 @@ export class OandaBroker extends BaseBroker {
 
       this.streamConnection = response.data;
       this.connected = true;
-      
+
+      const stream = this.streamConnection!; // Non-null assertion: we just assigned it above
       let buffer = "";
-      this.streamConnection.on("data", (chunk: Buffer) => {
+      stream.on("data", (chunk: Buffer) => {
         buffer += chunk.toString();
         const lines = buffer.split("\n");
         buffer = lines.pop() || "";
@@ -64,27 +69,30 @@ export class OandaBroker extends BaseBroker {
             } catch (err) {
               // Log non-heartbeat errors for debugging
               if (!line.includes("HEARTBEAT")) {
-                console.log("Oanda parse error:", err, "Line:", line.substring(0, 100));
+                logger.warn({
+                  err,
+                  line: line.substring(0, 100)
+                }, 'OANDA parse error');
               }
             }
           }
         });
       });
 
-      this.streamConnection.on("error", (err: Error) => {
-        console.error("Oanda stream error:", err.message);
+      stream.on("error", (err: Error) => {
+        logger.error({ err: err.message }, 'OANDA stream error');
         this.emitError(new Error(`Oanda stream error: ${err}`));
         this.connected = false;
         this.handleReconnect();
       });
-      
-      this.streamConnection.on("end", () => {
-        console.log("Oanda stream ended");
+
+      stream.on("end", () => {
+        logger.info('OANDA stream ended');
         this.connected = false;
         this.handleReconnect();
       });
 
-      console.log("Oanda broker connected");
+      logger.info({ instruments }, 'OANDA broker connected');
     } catch (err) {
       throw new Error(`Failed to connect to Oanda: ${err}`);
     }
@@ -101,18 +109,18 @@ export class OandaBroker extends BaseBroker {
   
   private handleReconnect(): void {
     if (this.isReconnecting || !this.subscriptions.size) return;
-    
+
     this.clearReconnectTimeout();
     this.isReconnecting = true;
-    
-    console.log("OANDA: Scheduling reconnect in 5 seconds...");
+
+    logger.info('OANDA: Scheduling reconnect in 5 seconds');
     this.reconnectTimeout = setTimeout(async () => {
       try {
-        console.log("OANDA: Attempting to reconnect...");
+        logger.info('OANDA: Attempting to reconnect');
         await this.connect();
         this.isReconnecting = false;
       } catch (err) {
-        console.error("OANDA: Reconnection failed:", err);
+        logger.error({ err }, 'OANDA: Reconnection failed');
         this.isReconnecting = false;
         this.handleReconnect(); // Try again
       }
@@ -152,19 +160,24 @@ export class OandaBroker extends BaseBroker {
   private handleMessage(msg: any): void {
     if (msg.type === "PRICE") {
       try {
-        // OANDA doesn't include instrument in each PRICE message
-        // We need to use the subscribed instruments
-        const instrument = Array.from(this.subscriptions)[0]; // For now, assume single subscription
-        
+        // OANDA includes the instrument in each PRICE message
+        const instrument = msg.instrument;
+
         if (!instrument) {
-          console.log("WARNING: No subscribed instruments");
+          logger.warn({ msg }, 'OANDA: PRICE message missing instrument field');
+          return;
+        }
+
+        // Verify this is a subscribed instrument
+        if (!this.subscriptions.has(instrument)) {
+          logger.debug({ instrument }, 'OANDA: Received price for unsubscribed instrument');
           return;
         }
 
         const bid = parseFloat(msg.bids[0].price);
         const ask = parseFloat(msg.asks[0].price);
         const midPrice = (bid + ask) / 2;
-        
+
         const marketData: MarketData = {
           broker: "oanda",
           symbol: this.denormalizeSymbol(instrument),
@@ -177,12 +190,19 @@ export class OandaBroker extends BaseBroker {
             volume: parseFloat(msg.bids[0].liquidity)
           }
         };
-        
-        console.log(`Emitting: ${marketData.symbol} bid:${bid} ask:${ask} mid:${midPrice}`);
+
+        logger.debug({
+          symbol: marketData.symbol,
+          bid,
+          ask,
+          mid: midPrice
+        }, 'OANDA tick received');
         this.emitMarketData(marketData);
       } catch (error) {
-        console.error("Error parsing OANDA data:", error);
-        console.log("Raw message:", JSON.stringify(msg));
+        logger.error({
+          err: error,
+          rawMessage: JSON.stringify(msg).substring(0, 200)
+        }, 'Error parsing OANDA data');
       }
     }
   }

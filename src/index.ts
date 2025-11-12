@@ -5,60 +5,70 @@ import cors from "cors";
 import crypto from "crypto";
 import { BrokerManager } from "./core/BrokerManager.js";
 import { ClientConnection } from "./core/ClientConnection.js";
-import { MarketData } from "./types/index.js";
+import { MarketData, ServerConfig, Timeframe } from "./types/index.js";
 import { loadConfig } from "./utils/config.js";
-import { testConnection } from "./utils/database.js";
-import pino from "pino";
+import { testConnection, getPool } from "./utils/database.js";
+import { MetadataService } from "./services/metadataService.js";
+import { CandlesService } from "./services/candlesService.js";
+import { schemas, validateQuery, sanitizeSymbol, ApiError } from "./middleware/validation.js";
+import { errorHandler, notFoundHandler, asyncHandler } from "./middleware/errorHandler.js";
+import { apiLimiter, strictLimiter, healthLimiter } from "./middleware/rateLimiter.js";
+import { CACHE_DURATIONS } from "./utils/constants.js";
+import { createLogger } from "./utils/logger.js";
+import { swaggerSpec } from "./config/swagger.js";
+import swaggerUi from "swagger-ui-express";
 import dotenv from "dotenv";
 
 // Load environment variables from .env file
 dotenv.config();
 
-const logger = pino({
-  transport: {
-    target: "pino-pretty",
-    options: {
-      colorize: true
-    }
-  }
-});
+const logger = createLogger();
 
 class MarketDataServer {
   private app = express();
   private server = createServer(this.app);
   private wss = new WebSocketServer({ server: this.server });
-  private brokerManager = new BrokerManager();
+  private brokerManager = new BrokerManager(logger);
   private clients = new Map<string, ClientConnection>();
-  private config: any;
+  private config!: ServerConfig;
+  private metadataService!: MetadataService;
+  private candlesService!: CandlesService;
 
   async start(): Promise<void> {
     // Load configuration
     this.config = await loadConfig();
-    
+
     // Test database connection
     try {
       await testConnection();
+      logger.info('Database connection successful');
     } catch (error: any) {
-      logger.error('Failed to connect to database:', error);
+      logger.error({ err: error }, 'Failed to connect to database');
       process.exit(1);
     }
-    
+
+    // Initialize services
+    const pool = getPool();
+    this.metadataService = new MetadataService(pool);
+    this.candlesService = new CandlesService(pool);
+    logger.info('Services initialized');
+
     // Setup HTTP endpoints
-    console.log('About to setup HTTP endpoints...');
+    logger.info('Setting up HTTP endpoints');
     try {
       this.setupHttpEndpoints();
-      console.log('HTTP endpoints setup completed successfully');
+      logger.info('HTTP endpoints setup completed successfully');
     } catch (error) {
-      console.error('CRITICAL: HTTP endpoints setup failed:', error);
+      logger.error({ err: error }, 'CRITICAL: HTTP endpoints setup failed');
       throw error;
     }
-    
+
     // Initialize brokers
     await this.initializeBrokers();
-    
+
     // Setup WebSocket server
     this.setupWebSocketServer();
-    
+
     // Start server
     const port = this.config.server?.port || 8080;
     this.server.listen(port, () => {
@@ -66,142 +76,133 @@ class MarketDataServer {
     });
   }
 
-  private getCacheDuration(timeframe: string): number {
-    switch(timeframe) {
-      case '1m':
-        return 60;    // 1 minute
-      case '5m':
-        return 300;   // 5 minutes
-      case '15m':
-        return 600;   // 10 minutes
-      case '1h':
-        return 1800;  // 30 minutes
-      case '4h':
-      case '12h':
-        return 3600;  // 1 hour
-      default:
-        return 600;   // 10 minutes default
-    }
-  }
-
   private setupHttpEndpoints(): void {
     try {
-      console.log('Setting up HTTP endpoints...');
-      
-      // Enable CORS for all routes
-      this.app.use(cors());
-      
+      logger.debug('Setting up HTTP endpoints');
+
+      // Enable CORS with origin restrictions
+      const allowedOrigins = process.env.ALLOWED_ORIGINS?.split(',') || [
+        'http://localhost:3000',
+        'http://localhost:5173'  // Vite default port
+      ];
+
+      this.app.use(cors({
+        origin: (origin, callback) => {
+          // Allow requests with no origin (like mobile apps, curl, Postman)
+          if (!origin) return callback(null, true);
+
+          if (allowedOrigins.includes(origin)) {
+            callback(null, true);
+          } else {
+            logger.warn({ origin }, 'Blocked CORS request from unauthorized origin');
+            callback(new Error('Not allowed by CORS'));
+          }
+        },
+        credentials: true,
+        methods: ['GET', 'POST', 'OPTIONS'],
+        allowedHeaders: ['Content-Type', 'Authorization']
+      }));
+
       // Parse JSON bodies
       this.app.use(express.json());
-      
-      // Health check endpoint
-      this.app.get("/health", (_, res) => {
-        res.json({
-          status: "healthy",
-          clients: this.clients.size,
-          uptime: process.uptime()
-        });
-      });
-      console.log('✓ Registered /health route');
+
+      // Swagger API Documentation
+      this.app.use('/api-docs', swaggerUi.serve, swaggerUi.setup(swaggerSpec, {
+        customCss: '.swagger-ui .topbar { display: none }',
+        customSiteTitle: 'Market Data Server API Docs'
+      }));
+      logger.debug('Registered /api-docs route (Swagger UI)');
+
+      // Health check endpoint with database connectivity check
+      this.app.get("/health", healthLimiter, asyncHandler(async (_, res) => {
+        try {
+          // Check database connectivity
+          const pool = getPool();
+          await pool.query('SELECT 1');
+
+          res.json({
+            status: "healthy",
+            database: "connected",
+            clients: this.clients.size,
+            uptime: process.uptime()
+          });
+        } catch (err) {
+          logger.error({ err }, 'Health check failed - database unavailable');
+          res.status(503).json({
+            status: "unhealthy",
+            database: "disconnected",
+            clients: this.clients.size,
+            uptime: process.uptime()
+          });
+        }
+      }));
+      logger.debug('Registered /health route');
 
       // Metrics endpoint
-      this.app.get("/metrics", (_, res) => {
+      this.app.get("/metrics", healthLimiter, (_, res) => {
         res.json({
           connections: this.clients.size,
           subscriptions: Array.from(this.clients.values())
             .reduce((acc, client) => acc + client.getSubscriptions().length, 0)
         });
       });
-      console.log('✓ Registered /metrics route');
+      logger.debug('Registered /metrics route');
 
       // Metadata API endpoint - discover available symbols and date ranges
-      this.app.get("/api/metadata", async (req, res): Promise<void> => {
-        try {
+      this.app.get("/api/metadata",
+        apiLimiter,
+        validateQuery(schemas.metadata),
+        asyncHandler(async (req, res): Promise<void> => {
           const { symbol } = req.query;
-
-          // Import database
-          const { getPool } = await import("./utils/database.js");
-          const pool = getPool();
 
           if (symbol) {
             // Get metadata for a specific symbol
-            const normalizedSymbol = (symbol as string).replace('/', '');
+            const normalizedSymbol = sanitizeSymbol(symbol as string);
+            const metadata = await this.metadataService.getSymbolMetadata(normalizedSymbol);
 
-            const result = await pool.query(`
-              SELECT
-                symbol,
-                MIN(time) as earliest,
-                MAX(time) as latest,
-                COUNT(*) as tick_count
-              FROM market_ticks
-              WHERE symbol = $1
-              GROUP BY symbol
-            `, [normalizedSymbol]);
-
-            if (result.rows.length === 0) {
-              res.status(404).json({
-                error: "Symbol not found",
-                symbol: normalizedSymbol
-              });
-              return;
+            if (!metadata) {
+              throw new ApiError(404, "Symbol not found", "SYMBOL_NOT_FOUND");
             }
 
-            const row = result.rows[0];
-            res.json({
-              symbol: row.symbol,
-              earliest: Math.floor(new Date(row.earliest).getTime() / 1000),
-              latest: Math.floor(new Date(row.latest).getTime() / 1000),
-              tick_count: parseInt(row.tick_count),
-              timeframes: ['1m', '5m', '15m', '1h', '4h', '12h']
-            });
+            res.json(metadata);
           } else {
-            // Get list of all available symbols with their date ranges
-            const result = await pool.query(`
-              SELECT
-                symbol,
-                MIN(time) as earliest,
-                MAX(time) as latest,
-                COUNT(*) as tick_count
-              FROM market_ticks
-              GROUP BY symbol
-              ORDER BY symbol
-            `);
-
-            const symbols = result.rows.map(row => ({
-              symbol: row.symbol,
-              earliest: Math.floor(new Date(row.earliest).getTime() / 1000),
-              latest: Math.floor(new Date(row.latest).getTime() / 1000),
-              tick_count: parseInt(row.tick_count)
-            }));
-
-            res.json({
-              symbols,
-              timeframes: ['1m', '5m', '15m', '1h', '4h', '12h']
-            });
+            // Get list of all available symbols
+            const data = await this.metadataService.getAllSymbols();
+            res.json(data);
           }
-        } catch (error) {
-          console.error('Metadata endpoint error:', error);
-          res.status(500).json({ error: "Internal server error" });
-        }
-      });
-      console.log('✓ Registered /api/metadata route');
+        })
+      );
+      logger.debug('Registered /api/metadata route');
 
       // Candles API endpoint
-      this.app.get("/api/candles", async (req, res): Promise<void> => {
-        try {
-          const { symbol, timeframe = '1h', from, to } = req.query;
+      this.app.get("/api/candles",
+        strictLimiter,
+        validateQuery(schemas.candles),
+        asyncHandler(async (req, res): Promise<void> => {
+          const { symbol, timeframe, from, to } = req.query as unknown as {
+            symbol: string;
+            timeframe: Timeframe;
+            from: number;
+            to: number;
+          };
 
-          if (!symbol || !from || !to) {
-            res.status(400).json({
-              error: "Missing required parameters: symbol, from, to"
-            });
-            return;
+          // Normalize symbol format (remove slashes)
+          const normalizedSymbol = sanitizeSymbol(symbol);
+
+          // Check if symbol exists in database
+          const symbolExists = await this.metadataService.symbolExists(normalizedSymbol);
+          if (!symbolExists) {
+            throw new ApiError(
+              404,
+              `Symbol '${normalizedSymbol}' not found in database`,
+              'SYMBOL_NOT_FOUND'
+            );
           }
 
-          // Normalize symbol format (remove slashes for database compatibility)
-          const normalizedSymbol = (symbol as string).replace('/', '');
+          // Get available date range for this symbol
+          const dateRange = await this.metadataService.getSymbolDateRange(normalizedSymbol);
 
-          // Generate a cache key for ETag
+          // Generate ETag for browser caching
           const cacheKey = `${normalizedSymbol}-${timeframe}-${from}-${to}`;
           const etag = crypto.createHash('md5').update(cacheKey).digest('hex');
 
@@ -211,102 +212,45 @@ class MarketDataServer {
             return;
           }
 
-          // Import database and execute query
-          const { getPool } = await import("./utils/database.js");
-
-          // Map timeframes to materialized view names
-          const timeframeViewMap: Record<string, string> = {
-            '5m': 'forex_candles_5m',
-            '15m': 'forex_candles_15m',
-            '1h': 'forex_candles_1h',
-            '4h': 'forex_candles_4h',
-            '12h': 'forex_candles_12h'
-          };
-
-          const pool = getPool();
-          const viewName = timeframeViewMap[timeframe as string];
-
-          let query: string;
-          let queryParams: any[];
-
-          if (viewName) {
-            // Use materialized view for supported timeframes
-            query = `
-              SELECT
-                EXTRACT(EPOCH FROM t_open)::bigint AS time,
-                open,
-                high,
-                low,
-                close
-              FROM ${viewName}
-              WHERE symbol = $1
-                AND t_open >= to_timestamp($2)
-                AND t_open <= to_timestamp($3)
-              ORDER BY t_open ASC;
-            `;
-            queryParams = [
-              normalizedSymbol,
-              parseInt(from as string),
-              parseInt(to as string)
-            ];
-          } else {
-            // Fallback to raw ticks for unsupported timeframes (e.g., 1m)
-            const timeframeMap: Record<string, string> = {
-              '1m': '1 minute'
-            };
-            const interval = timeframeMap[timeframe as string] || '1 hour';
-
-            query = `
-              SELECT
-                EXTRACT(EPOCH FROM time_bucket($1, time))::bigint AS time,
-                (array_agg(mid_price ORDER BY time ASC))[1] AS open,
-                MAX(mid_price) AS high,
-                MIN(mid_price) AS low,
-                (array_agg(mid_price ORDER BY time DESC))[1] AS close
-              FROM market_ticks
-              WHERE symbol = $2
-                AND time >= to_timestamp($3)
-                AND time <= to_timestamp($4)
-              GROUP BY time_bucket($1, time)
-              ORDER BY time ASC;
-            `;
-            queryParams = [
-              interval,
-              normalizedSymbol,
-              parseInt(from as string),
-              parseInt(to as string)
-            ];
-          }
-
-          const result = await pool.query(query, queryParams);
-          
-          const candles = result.rows.map(row => ({
-            time: parseInt(row.time),
-            open: parseFloat(parseFloat(row.open).toFixed(5)),
-            high: parseFloat(parseFloat(row.high).toFixed(5)),
-            low: parseFloat(parseFloat(row.low).toFixed(5)),
-            close: parseFloat(parseFloat(row.close).toFixed(5))
-          }));
+          // Fetch candles using service
+          const candles = await this.candlesService.getCandles(
+            normalizedSymbol,
+            timeframe,
+            from,
+            to
+          );
 
           // Set cache headers
+          const cacheDuration = CACHE_DURATIONS[timeframe] || CACHE_DURATIONS.default;
           res.set({
-            'Cache-Control': `public, max-age=${this.getCacheDuration(timeframe as string)}`,
+            'Cache-Control': `public, max-age=${cacheDuration}`,
             'ETag': etag,
             'Vary': 'Accept-Encoding', // Important for CDNs
             'Last-Modified': new Date().toUTCString()
           });
 
+          // Add helpful headers when no data is returned
+          if (candles.length === 0 && dateRange) {
+            res.set({
+              'X-Data-Available': 'false',
+              'X-Available-From': new Date(dateRange.earliest * 1000).toISOString(),
+              'X-Available-To': new Date(dateRange.latest * 1000).toISOString(),
+              'Warning': '199 - "No data available for requested date range. Check X-Available-From and X-Available-To headers for available data range."'
+            });
+          }
+
           res.json(candles);
-        } catch (error) {
-          console.error('Candles endpoint error:', error);
-          res.status(500).json({ error: "Internal server error" });
-        }
-      });
-      console.log('✓ Registered /api/candles route');
-      
-      console.log('✓ All HTTP endpoints setup complete');
+        })
+      );
+      logger.debug('Registered /api/candles route');
+
+      // Error handling middleware (must be last)
+      this.app.use(notFoundHandler);
+      this.app.use(errorHandler(logger));
+
+      logger.debug('All HTTP endpoints setup complete');
     } catch (error) {
-      console.error('✗ Error setting up HTTP endpoints:', error);
+      logger.error({ err: error }, 'Error setting up HTTP endpoints');
       throw error;
     }
   }
@@ -314,13 +258,13 @@ class MarketDataServer {
 
   private async initializeBrokers(): Promise<void> {
     const brokers = this.config.brokers || [];
-    
-    console.log('Initializing brokers:', brokers);
-    
+
+    logger.info({ brokerCount: brokers.length }, 'Initializing brokers');
+
     if (Array.isArray(brokers)) {
       for (const brokerConfig of brokers) {
         if (brokerConfig.enabled) {
-          console.log(`Adding broker: ${brokerConfig.name}`);
+          logger.info({ broker: brokerConfig.name }, 'Adding broker');
           await this.brokerManager.addBroker(brokerConfig);
         }
       }

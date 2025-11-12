@@ -1,6 +1,9 @@
 import WebSocket from "ws";
 import { BaseBroker } from "./BaseBroker.js";
 import { MarketData } from "../types/index.js";
+import { createLogger } from "../utils/logger.js";
+
+const logger = createLogger();
 
 export class BinanceBroker extends BaseBroker {
   private ws?: WebSocket;
@@ -13,16 +16,16 @@ export class BinanceBroker extends BaseBroker {
       ).join("/");
       
       const wsUrl = this.config.url || 'wss://stream.binance.com:9443';
-      const url = streams 
+      const url = streams
         ? `${wsUrl}/stream?streams=${streams}`
         : `${wsUrl}/ws`;
 
-      console.log(`Connecting to Binance WebSocket: ${url}`);
+      logger.info({ url }, 'Connecting to Binance WebSocket');
       this.ws = new WebSocket(url);
 
       this.ws.on("open", () => {
         this.connected = true;
-        console.log(`Binance broker connected`);
+        logger.info('Binance broker connected');
         resolve();
       });
 
@@ -102,8 +105,10 @@ export class BinanceBroker extends BaseBroker {
   private handleReconnect(): void {
     if (!this.reconnectTimeout) {
       this.reconnectTimeout = setTimeout(() => {
-        console.log("Attempting to reconnect to Binance...");
-        this.connect().catch(console.error);
+        logger.info('Attempting to reconnect to Binance');
+        this.connect().catch((err) => {
+          logger.error({ err }, 'Binance reconnection failed');
+        });
         this.reconnectTimeout = undefined;
       }, 5000);
     }

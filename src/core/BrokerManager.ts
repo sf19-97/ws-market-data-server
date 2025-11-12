@@ -4,11 +4,16 @@ import { MockBinanceBroker } from "../brokers/MockBinanceBroker.js";
 import { OandaBroker } from "../brokers/OandaBroker.js";
 import { KrakenBroker } from "../brokers/KrakenBroker.js";
 import { BrokerConfig, MarketData } from "../types/index.js";
+import { Logger } from "pino";
 
 export class BrokerManager extends EventEmitter {
   private globalBrokers: Map<string, BaseBroker> = new Map();
   private clientBrokers: Map<string, Map<string, BaseBroker>> = new Map();
   private symbolToBroker: Map<string, string> = new Map();
+
+  constructor(private logger: Logger) {
+    super();
+  }
 
   async addBroker(config: BrokerConfig): Promise<void> {
     if (!config.enabled) return;
@@ -28,7 +33,7 @@ export class BrokerManager extends EventEmitter {
         broker = new KrakenBroker(config);
         break;
       default:
-        console.warn(`Unknown broker type: ${config.name}`);
+        this.logger.warn({ brokerType: config.name }, 'Unknown broker type');
         return;
     }
 
@@ -37,7 +42,7 @@ export class BrokerManager extends EventEmitter {
     });
 
     broker.on("error", (error: Error) => {
-      console.error(`Broker ${config.name} error:`, error);
+      this.logger.error({ broker: config.name, err: error }, 'Broker error');
     });
 
     this.globalBrokers.set(config.name, broker);
@@ -45,7 +50,7 @@ export class BrokerManager extends EventEmitter {
     try {
       await broker.connect();
     } catch (err) {
-      console.error(`Failed to connect broker ${config.name}:`, err);
+      this.logger.error({ broker: config.name, err }, 'Failed to connect broker');
     }
   }
 
@@ -90,15 +95,16 @@ export class BrokerManager extends EventEmitter {
   }
 
   async subscribe(broker: string | undefined, symbols: string[], clientId?: string): Promise<void> {
-    console.log(`BrokerManager.subscribe called with broker: ${broker}, symbols:`, symbols);
+    this.logger.debug({ broker, symbols, clientId }, 'Subscribe request');
+
     if (broker) {
       const brokerInstance = this.getBroker(broker, clientId);
       if (brokerInstance) {
-        console.log(`Found broker instance for ${broker}, subscribing...`);
+        this.logger.info({ broker, symbols, clientId }, 'Subscribing to broker');
         await brokerInstance.subscribe(symbols);
         symbols.forEach(s => this.symbolToBroker.set(s, broker));
       } else {
-        console.log(`No broker instance found for ${broker}`);
+        this.logger.warn({ broker, clientId }, 'No broker instance found');
       }
     } else {
       // Auto-route to best available broker

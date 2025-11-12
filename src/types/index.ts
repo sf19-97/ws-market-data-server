@@ -57,3 +57,41 @@ export interface BrokerConfig {
     token?: string;
   };
 }
+
+export interface ServerConfig {
+  server: {
+    port: number;
+    host: string;
+  };
+  brokers: BrokerConfig[];
+}
+
+export interface SymbolMetadata {
+  symbol: string;
+  earliest: number;
+  latest: number;
+  tick_count: number;
+  timeframes?: string[];
+}
+
+export interface Candle {
+  time: number;
+  open: number;
+  high: number;
+  low: number;
+  close: number;
+  volume?: number;
+}
+
+export type Timeframe = '1m' | '5m' | '15m' | '1h' | '4h' | '12h';
+
+export interface DatabaseConfig {
+  connectionString: string;
+  max?: number;
+  idleTimeoutMillis?: number;
+  connectionTimeoutMillis?: number;
+  ssl?: boolean | {
+    rejectUnauthorized: boolean;
+    ca?: string;
+  };
+}
