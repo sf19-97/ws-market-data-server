@@ -10,6 +10,7 @@ import { loadConfig } from "./utils/config.js";
 import { testConnection, getPool } from "./utils/database.js";
 import { MetadataService } from "./services/metadataService.js";
 import { CandlesService } from "./services/candlesService.js";
+import { TickBatcher } from "./services/tickBatcher.js";
 import { schemas, validateQuery, sanitizeSymbol, ApiError } from "./middleware/validation.js";
 import { errorHandler, notFoundHandler, asyncHandler } from "./middleware/errorHandler.js";
 import { apiLimiter, strictLimiter, healthLimiter } from "./middleware/rateLimiter.js";
@@ -33,6 +34,7 @@ class MarketDataServer {
   private config!: ServerConfig;
   private metadataService!: MetadataService;
   private candlesService!: CandlesService;
+  private tickBatcher!: TickBatcher;
 
   async start(): Promise<void> {
     // Load configuration
@@ -51,6 +53,10 @@ class MarketDataServer {
     const pool = getPool();
     this.metadataService = new MetadataService(pool);
     this.candlesService = new CandlesService(pool);
+    this.tickBatcher = new TickBatcher({
+      maxBatchSize: 1000,     // Upload after 1000 ticks
+      maxBatchAgeMs: 5 * 60 * 1000  // Or after 5 minutes
+    });
     logger.info('Services initialized');
 
     // Setup HTTP endpoints
@@ -91,7 +97,26 @@ class MarketDataServer {
           // Allow requests with no origin (like mobile apps, curl, Postman)
           if (!origin) return callback(null, true);
 
+          // Check exact matches first
           if (allowedOrigins.includes(origin)) {
+            callback(null, true);
+            return;
+          }
+
+          // Check wildcard patterns (e.g., https://*.vercel.app)
+          const isAllowed = allowedOrigins.some(allowed => {
+            if (allowed.includes('*')) {
+              // Convert wildcard pattern to regex
+              const pattern = allowed
+                .replace(/\./g, '\\.')  // Escape dots
+                .replace(/\*/g, '.*');   // Convert * to .*
+              const regex = new RegExp(`^${pattern}$`);
+              return regex.test(origin);
+            }
+            return false;
+          });
+
+          if (isAllowed) {
             callback(null, true);
           } else {
             logger.warn({ origin }, 'Blocked CORS request from unauthorized origin');
@@ -373,7 +398,25 @@ class MarketDataServer {
 
     // Listen for market data from all brokers
     this.brokerManager.on("data", (data: MarketData) => {
+      // Broadcast to WebSocket clients
       this.broadcastToClients(data);
+
+      // Batch ticks for R2 upload (if tick data)
+      if (data.type === 'tick' && data.data.bid && data.data.ask && data.timestamp) {
+        // Convert timestamp to Unix seconds if it's in milliseconds
+        const timestampSeconds = data.timestamp > 1e12
+          ? Math.floor(data.timestamp / 1000)
+          : data.timestamp;
+
+        this.tickBatcher.addTick(
+          data.symbol,
+          timestampSeconds,
+          data.data.bid,
+          data.data.ask
+        ).catch(error => {
+          logger.error({ error, symbol: data.symbol }, 'Failed to batch tick for R2');
+        });
+      }
     });
   }
 
@@ -432,15 +475,20 @@ class MarketDataServer {
 
   async stop(): Promise<void> {
     logger.info("Shutting down server...");
-    
+
+    // Flush any pending tick batches to R2
+    if (this.tickBatcher) {
+      await this.tickBatcher.stop();
+    }
+
     // Disconnect all clients
     for (const client of this.clients.values()) {
       client.disconnect();
     }
-    
+
     // Disconnect all brokers
     await this.brokerManager.disconnectAll();
-    
+
     // Close server
     this.server.close();
   }

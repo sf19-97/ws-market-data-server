@@ -22,13 +22,14 @@ export const TIMEFRAMES = ['1m', '5m', '15m', '1h', '4h', '12h'] as const;
 
 /**
  * Mapping of timeframes to materialized view names
+ * Uses new R2 data lake candle tables (candles_5m, candles_15m, etc.)
  */
 export const TIMEFRAME_VIEW_MAP: Record<string, string> = {
-  '5m': 'forex_candles_5m',
-  '15m': 'forex_candles_15m',
-  '1h': 'forex_candles_1h',
-  '4h': 'forex_candles_4h',
-  '12h': 'forex_candles_12h'
+  '5m': 'candles_5m',
+  '15m': 'candles_15m',
+  '1h': 'candles_1h',
+  '4h': 'candles_4h',
+  '12h': 'candles_12h'
 } as const;
 
 /**

@@ -56,9 +56,9 @@ export class HistoricalDataImporter {
         },
         timeframe: 'tick',
         format: 'json',
-        // Performance optimizations
-        batchSize: 3, // Very conservative batching to avoid rate limits
-        pauseBetweenBatchesMs: 5000, // 5 second pause between batches
+        // Performance optimizations - MAXIMUM SPEED
+        batchSize: 100, // Download 100 hours in parallel (extreme speed)
+        pauseBetweenBatchesMs: 100, // Minimal 100ms pause between batches
         useCache: true, // Enable file-system cache
         retryOnEmpty: true, // Retry empty responses
         retryCount: 10, // Retry up to 10 times

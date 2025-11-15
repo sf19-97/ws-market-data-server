@@ -71,16 +71,16 @@ export class CandlesService {
 
       query = `
         SELECT
-          EXTRACT(EPOCH FROM t_open)::bigint AS time,
+          EXTRACT(EPOCH FROM time)::bigint AS time,
           open,
           high,
           low,
           close
         FROM ${viewName}
         WHERE symbol = $1
-          AND t_open >= to_timestamp($2)
-          AND t_open <= to_timestamp($3)
-        ORDER BY t_open ASC;
+          AND time >= to_timestamp($2)
+          AND time <= to_timestamp($3)
+        ORDER BY time ASC;
       `;
       queryParams = [symbol, from, to];
     } else {

@@ -158,13 +158,14 @@ export function isValidTimeframe(timeframe: string): boolean {
 
 /**
  * SQL injection prevention - allowlist for table/view names
+ * Updated for R2 data lake architecture (candles_5m, candles_15m, etc.)
  */
 export const ALLOWED_MATERIALIZED_VIEWS = new Set([
-  'forex_candles_5m',
-  'forex_candles_15m',
-  'forex_candles_1h',
-  'forex_candles_4h',
-  'forex_candles_12h'
+  'candles_5m',
+  'candles_15m',
+  'candles_1h',
+  'candles_4h',
+  'candles_12h'
 ]);
 
 export function validateMaterializedViewName(viewName: string): void {
