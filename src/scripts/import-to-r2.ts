@@ -77,7 +77,7 @@ class DukascopyToR2Importer {
           retryOnEmpty: true,
           retryCount: 10,
           pauseBetweenRetriesMs: 10000,
-          failAfterRetryCount: false
+          failAfterRetryCount: true
         });
 
         if (!data || data.length === 0) {
@@ -104,15 +104,79 @@ class DukascopyToR2Importer {
         processedChunks++;
 
       } catch (error: any) {
-        const isFetchError = error.message?.includes('BufferFetcher') ||
-                            error.message?.includes('getHistoricalRates') ||
-                            error.message?.includes('Unknown error');
+        const isDNSError = error.message?.includes('ENOTFOUND') ||
+                          error.message?.includes('getaddrinfo') ||
+                          error.message?.includes('EAI_AGAIN');
 
-        if (isFetchError) {
-          console.error(`   ❌ Dukascopy fetch error:`, error.message);
-          console.log(`   ⏭️  Skipping chunk - continuing...`);
+        const isNetworkError = isDNSError ||
+                              error.message?.includes('ETIMEDOUT') ||
+                              error.message?.includes('ECONNREFUSED') ||
+                              error.message?.includes('network') ||
+                              error.message?.includes('socket hang up');
+
+        if (isNetworkError) {
+          console.error(`   ⚠️  Network error (will retry):`, error.message);
+          console.log(`   ⏸️  Waiting 30 seconds before retry...`);
+
+          // Wait 30 seconds for DNS/network recovery
+          await new Promise(resolve => setTimeout(resolve, 30000));
+
+          // Retry the same chunk
+          console.log(`   🔄 Retrying chunk ${processedChunks + 1}...`);
+          try {
+            const data = await getHistoricalRates({
+              instrument: symbol.toLowerCase() as any,
+              dates: {
+                from: new Date(currentDate),
+                to: new Date(chunkEnd)
+              },
+              timeframe: 'tick',
+              format: 'json',
+              batchSize: 100,
+              pauseBetweenBatchesMs: 100,
+              useCache: true,
+              retryOnEmpty: true,
+              retryCount: 10,
+              pauseBetweenRetriesMs: 10000,
+              failAfterRetryCount: true
+            });
+
+            if (!data || data.length === 0) {
+              console.log(`   ⚠️  No data found for this chunk after retry`);
+              currentDate = new Date(chunkEnd);
+              continue;
+            }
+
+            console.log(`   ✅ Retry successful: ${data.length.toLocaleString()} ticks`);
+
+            const ticks: Tick[] = data.map(tick => ({
+              timestamp: tick.timestamp / 1000,
+              bid: tick.bidPrice,
+              ask: tick.askPrice
+            }));
+
+            const chunkDate = new Date(currentDate);
+            const key = await this.r2Client!.uploadTicks(symbol, chunkDate, ticks);
+            console.log(`   📤 Uploaded to R2: ${key}`);
+
+            totalTicks += ticks.length;
+            processedChunks++;
+
+          } catch (retryError: any) {
+            console.error(`   ❌ Retry failed:`, retryError.message);
+            console.log(`   ⏭️  Skipping chunk after retry failure`);
+          }
+        } else if (error.message?.includes('BufferFetcher') || error.stack?.includes('BufferFetcher')) {
+          // Data not available for this date (e.g., future dates, or Dukascopy issues)
+          console.log(`   ℹ️  No data available for this date (Dukascopy BufferFetcher error)`);
         } else {
-          console.error(`   ❌ Upload error:`, error.message);
+          // R2 upload errors should throw
+          console.error(`   ❌ Upload error details:`);
+          console.error(`   Error message:`, error.message);
+          console.error(`   Error name:`, error.name);
+          console.error(`   Error code:`, error.code);
+          console.error(`   Error stack:`, error.stack);
+          console.error(`   Full error object:`, JSON.stringify(error, null, 2));
           throw error;
         }
       }
@@ -120,8 +184,8 @@ class DukascopyToR2Importer {
       // Move to next chunk
       currentDate = new Date(chunkEnd);
 
-      // Delay between chunks
-      await new Promise(resolve => setTimeout(resolve, 1000));
+      // Delay between chunks (10 seconds for DNS recovery)
+      await new Promise(resolve => setTimeout(resolve, 10000));
     }
 
     console.log(`\n🎉 Import complete!`);
@@ -161,7 +225,12 @@ async function main() {
   try {
     await importer.import(symbol, startDate, endDate, chunkHours);
   } catch (error: any) {
-    console.error('\n❌ Fatal error:', error.message);
+    console.error('\n❌ Fatal error details:');
+    console.error('Error message:', error.message);
+    console.error('Error name:', error.name);
+    console.error('Error code:', error.code);
+    console.error('Error stack:', error.stack);
+    console.error('Full error object:', JSON.stringify(error, null, 2));
     process.exit(1);
   }
 }

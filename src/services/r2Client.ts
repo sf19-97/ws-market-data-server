@@ -83,6 +83,13 @@ export class R2Client {
   isConfigured(): boolean {
     return !!(process.env.R2_ENDPOINT && process.env.R2_ACCESS_KEY_ID);
   }
+
+  /**
+   * Get the S3 client instance (for direct operations)
+   */
+  get s3Client(): S3Client {
+    return this.s3;
+  }
 }
 
 // Singleton instance

@@ -65,12 +65,33 @@ The 7 major forex pairs to import:
 6. USDCAD - US Dollar/Canadian Dollar
 7. NZDUSD - New Zealand Dollar/US Dollar
 
-### Step 2: Parallel Import Commands
+### Step 2: Parallel Import Commands (UPDATED - USE THIS METHOD)
 
-Run all pairs in parallel for efficiency:
+⚠️ **IMPORTANT**: Use the `parallel-import.sh` script to avoid DNS exhaustion issues:
 
 ```bash
-# Start all imports in parallel (background processes)
+# RECOMMENDED: Use the parallel import script with proper DNS configuration
+./parallel-import.sh major-pairs 2024-01-01 2024-12-31
+
+# Fill known gaps in the data
+./parallel-import.sh fill-gaps
+
+# Import single symbol
+./parallel-import.sh single EURUSD 2024-11-01 2024-11-30
+```
+
+**Why use the script?**
+- Sets `UV_THREADPOOL_SIZE=128` to handle parallel DNS lookups (default is only 4)
+- Includes proper retry logic for network errors
+- Maintains full parallelization without DNS exhaustion
+- Automatically handles all major forex pairs
+
+**Manual parallel imports (if needed):**
+```bash
+# MUST set UV_THREADPOOL_SIZE first to avoid DNS issues!
+export UV_THREADPOOL_SIZE=128
+
+# Then run imports in parallel
 npx tsx src/scripts/import-to-r2.ts GBPUSD 2024-10-15 2024-11-15 &
 npx tsx src/scripts/import-to-r2.ts USDJPY 2024-10-15 2024-11-15 &
 npx tsx src/scripts/import-to-r2.ts USDCHF 2024-10-15 2024-11-15 &
@@ -173,6 +194,45 @@ REFRESH MATERIALIZED VIEW CONCURRENTLY candles_12h;
    DROP TABLE IF EXISTS candles_5m CASCADE;
    -- Then recreate with original schema
    ```
+
+6. **DNS exhaustion errors (FIXED in latest version)**
+   - Symptom: `getaddrinfo ENOTFOUND datafeed.dukascopy.com`
+   - Cause: Node.js default UV_THREADPOOL_SIZE=4 limits DNS lookups
+   - Solution: Use `parallel-import.sh` script or set `export UV_THREADPOOL_SIZE=128`
+   - Script now includes proper network retry logic (30-second wait + retry)
+
+7. **"Unknown error" crashes on certain dates (FIXED in latest version)**
+   - Symptom: Import fails with "Unknown error" after 3-4 chunks, always on specific dates (e.g., Jan 3-5, 2024)
+   - Cause: Dukascopy's BufferFetcher throws errors for unavailable data, but `error.message` is just "Unknown error"
+   - Root issue: Error handling only checked `error.message`, not `error.stack` which contained "BufferFetcher"
+   - Solution: Enhanced error handling in `import-to-r2.ts` line 169:
+     ```typescript
+     // OLD (broken):
+     } else if (error.message?.includes('BufferFetcher')) {
+
+     // NEW (fixed):
+     } else if (error.message?.includes('BufferFetcher') || error.stack?.includes('BufferFetcher')) {
+     ```
+   - Impact: Imports now gracefully skip problematic dates instead of crashing
+   - Enhanced logging shows full error details (message, name, code, stack) for debugging
+
+8. **Import processes hanging indefinitely (FIXED in latest version)**
+   - Symptom: Import processes run for 18+ hours without completing, stuck in "SN" (sleeping) state
+   - Last log message: "🔍 Fetching from Dukascopy..." with no further progress
+   - Cause: `failAfterRetryCount: false` in `getHistoricalRates` config causes infinite retry loops
+   - When Dukascopy has persistent issues fetching certain dates, it retries forever (every 10 seconds)
+   - Root issue: Configured in `import-to-r2.ts` lines 80 and 141
+   - Solution: Changed to `failAfterRetryCount: true` to enforce retry limits
+     ```typescript
+     // OLD (broken):
+     failAfterRetryCount: false  // Retries forever!
+
+     // NEW (fixed):
+     failAfterRetryCount: true   // Fails after 10 retries (100 seconds)
+     ```
+   - Impact: Processes now fail fast after 10 retries, allowing error handling to catch and skip problematic chunks
+   - Debugging method: Check process state with `ps -p <PID> -o pid,stat,wchan,etime` - "SN" status for hours indicates infinite retry
+   - Total time wasted before fix: 18+ hours per stuck process
 
 ## Verification
 

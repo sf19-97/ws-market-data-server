@@ -476,6 +476,88 @@ The server handles format conversion automatically.
 - Check network connection to Dukascopy
 - Reduce chunk size with `--chunk` parameter
 
+### R2 Import Errors
+
+**"Unknown error" crashes during R2 imports (FIXED)**
+
+Symptom: Import crashes with "Unknown error" after 3-4 chunks, always on specific dates.
+
+Root cause: Dukascopy's BufferFetcher throws errors for unavailable data, but `error.message` is unhelpful ("Unknown error"). Error handling only checked `error.message`, not `error.stack` which contained "BufferFetcher".
+
+Debugging method (CRITICAL - use this for similar errors):
+1. **Enhance error logging** to see the FULL error object:
+   ```typescript
+   catch (error: any) {
+     console.error('Error message:', error.message);
+     console.error('Error name:', error.name);
+     console.error('Error code:', error.code);
+     console.error('Error stack:', error.stack);  // <-- Key: stack trace reveals true source
+     console.error('Full error object:', JSON.stringify(error, null, 2));
+     throw error;
+   }
+   ```
+
+2. **Run a test import** for a single problematic day:
+   ```bash
+   UV_THREADPOOL_SIZE=128 npx tsx src/scripts/import-to-r2.ts EURUSD 2024-01-06 2024-01-07 2>&1 | tee test.log
+   ```
+
+3. **Examine the stack trace** in the log file. Look for the actual source of the error (BufferFetcher in this case).
+
+4. **Fix error handling** to check BOTH `error.message` AND `error.stack`:
+   ```typescript
+   // BEFORE (broken):
+   } else if (error.message?.includes('BufferFetcher')) {
+
+   // AFTER (fixed):
+   } else if (error.message?.includes('BufferFetcher') || error.stack?.includes('BufferFetcher')) {
+   ```
+
+Location: `src/scripts/import-to-r2.ts:169`
+
+Impact: Imports now gracefully skip problematic dates instead of crashing, allowing full-year imports to complete successfully.
+
+Key lesson: When debugging mysterious errors, ALWAYS log the full error object including stack trace. The error message alone may not reveal the true source.
+
+**Import processes hanging indefinitely (FIXED)**
+
+Symptom: Import processes run for 18+ hours without completing, stuck in "SN" (sleeping) state. Last log message: "🔍 Fetching from Dukascopy..." with no further progress.
+
+Root cause: `failAfterRetryCount: false` in `getHistoricalRates` config causes infinite retry loops. When Dukascopy has persistent issues fetching certain dates, it retries forever (every 10 seconds) instead of failing.
+
+Debugging method:
+1. **Check process state** to identify hung processes:
+   ```bash
+   ps -p <PID> -o pid,stat,wchan,etime
+   ```
+   - "SN" status for hours/days indicates sleeping process (likely infinite retry)
+   - WCHAN shows "-" (not waiting on kernel event, stuck in user space)
+
+2. **Check last log output** to see where it's stuck:
+   ```bash
+   tail -100 import.log | grep -A 5 -B 5 "SYMBOL"
+   ```
+   - Look for "🔍 Fetching from Dukascopy..." with no completion
+
+3. **Identify the stuck date range** from chunk number in logs
+
+Fix:
+```typescript
+// BEFORE (broken - in import-to-r2.ts lines 80 and 141):
+failAfterRetryCount: false  // Retries forever!
+
+// AFTER (fixed):
+failAfterRetryCount: true   // Fails after 10 retries (100 seconds)
+```
+
+Location: `src/scripts/import-to-r2.ts:80` and `src/scripts/import-to-r2.ts:141`
+
+Impact: Processes now fail fast after 10 retries (100 seconds), allowing error handling to catch and skip problematic chunks instead of hanging indefinitely.
+
+Time saved: 18+ hours per stuck process (4 processes = 72+ hours wasted before fix).
+
+Key lesson: When configuring retry logic, ALWAYS set finite retry limits. Infinite retries should only be used with external circuit breakers or timeouts.
+
 ### API Issues
 
 **Empty candle responses:**
