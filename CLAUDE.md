@@ -75,9 +75,17 @@ ws-market-data-server/
 │   ├── core/                       # Core server components
 │   │   ├── BrokerManager.ts        # Broker orchestration
 │   │   └── ClientConnection.ts     # WebSocket client handler
+│   ├── services/                   # Business logic services
+│   │   ├── r2Client.ts             # Cloudflare R2 client for data lake storage
+│   │   ├── candlesService.ts       # Candle aggregation and caching
+│   │   └── tickBatcher.ts          # Real-time tick batching for R2
 │   ├── scripts/                    # Data import and maintenance
-│   │   ├── import-cli.ts           # CLI for historical data import
-│   │   ├── importHistoricalData.ts # Core importer class
+│   │   ├── import-cli.ts           # CLI for historical data import (TimescaleDB)
+│   │   ├── importHistoricalData.ts # Core importer class (TimescaleDB)
+│   │   ├── import-to-r2.ts         # R2 data lake importer (Dukascopy → R2)
+│   │   ├── backfill-r2.ts          # Migration tool (PostgreSQL → R2)
+│   │   ├── materialize-candles.ts  # R2 → PostgreSQL candle materialization
+│   │   ├── analyze-r2.ts           # R2 data analysis and statistics
 │   │   ├── drop-import-indexes.ts  # Index management for bulk loads
 │   │   ├── recreate-indexes.ts     # Rebuild indexes after import
 │   │   ├── post-import-cleanup.ts  # Database maintenance
@@ -89,18 +97,41 @@ ws-market-data-server/
 │       └── index-performance.md    # Index optimization analysis
 ├── config/
 │   └── config.yaml                 # Broker configuration
+├── migrations/                     # Database schema migrations
+│   └── candles_5m.sql              # Candle tables for R2 materialization
 ├── API_USAGE.md                    # REST API client guide
-├── IMPORT_GUIDE.md                 # Historical data import guide
+├── IMPORT_GUIDE.md                 # Historical data import guide (TimescaleDB)
 ├── INDEX_MANAGEMENT.md             # Database performance optimization
+├── R2_IMPORT_PROCESS.md            # R2 data lake import guide (RECOMMENDED)
+├── R2_DEPLOYMENT_GUIDE.md          # R2 deployment and production setup
 └── ARCHITECTURE.md                 # Detailed architecture docs
 ```
 
 ### Key Directories
 
 - **`/src/brokers/`** - Broker implementations for real-time data (Binance, OANDA)
-- **`/src/scripts/`** - Historical data import tools and database maintenance
+- **`/src/services/`** - Business logic (R2 client, candle aggregation, tick batching)
+- **`/src/scripts/`** - Data import tools (R2 data lake + legacy TimescaleDB)
 - **`/src/core/`** - WebSocket server and connection management
 - **`.claude/problems/`** - Technical analysis and performance investigations
+
+### Storage Architecture: Dual System
+
+The project uses a **dual storage approach**:
+
+1. **R2 Data Lake (RECOMMENDED)** - Cloudflare R2 for cost-effective tick storage
+   - 10x cheaper than database storage ($0.015/GB vs $0.15/GB)
+   - Direct import from Dukascopy to R2 (skip database entirely)
+   - On-demand materialization to PostgreSQL candles when needed
+   - See `R2_IMPORT_PROCESS.md` for complete guide
+
+2. **TimescaleDB (LEGACY)** - PostgreSQL with TimescaleDB extension
+   - Original system for tick storage and materialized views
+   - Still used for materialized candles (candles_5m table)
+   - Higher cost, but faster queries for pre-aggregated data
+   - See `IMPORT_GUIDE.md` for legacy import process
+
+**Migration Path**: New data → R2 data lake. Legacy data remains in TimescaleDB until migrated.
 
 ## Setup & Installation
 
@@ -125,13 +156,22 @@ cp .env.example .env
 ### Environment Variables
 
 ```bash
-# Database
+# Database (for candle materialization and legacy system)
 DATABASE_URL=postgresql://user:password@localhost:5432/market_data
 
-# Optional: Broker credentials
+# R2 Data Lake (REQUIRED for R2 imports)
+R2_ACCOUNT_ID=your_account_id
+R2_ACCESS_KEY_ID=your_access_key
+R2_SECRET_ACCESS_KEY=your_secret_key
+R2_BUCKET_NAME=data-lake
+R2_ENDPOINT=https://your_account_id.r2.cloudflarestorage.com
+
+# Optional: Broker credentials for real-time data
 OANDA_API_KEY=your-api-key
 OANDA_ACCOUNT_ID=your-account-id
 ```
+
+**Note:** For R2 setup instructions, see `R2_DEPLOYMENT_GUIDE.md`
 
 ### Database Setup
 
@@ -256,7 +296,38 @@ ws.send(JSON.stringify({
 
 ## Historical Data Import
 
-### Quick Start
+### R2 Data Lake Import (RECOMMENDED)
+
+**Direct import from Dukascopy to R2** - 10x cheaper storage, no database overhead.
+
+```bash
+# Import one symbol for a date range
+npx tsx src/scripts/import-to-r2.ts EURUSD 2024-01-01 2024-12-31
+
+# Import with custom chunk size (default is 24 hours)
+npx tsx src/scripts/import-to-r2.ts EURUSD 2024-01-01 2024-12-31 24
+
+# Import multiple symbols in parallel (RECOMMENDED - see R2_IMPORT_PROCESS.md)
+./parallel-import.sh major-pairs 2024-01-01 2024-12-31
+
+# Analyze R2 data
+npx tsx src/scripts/analyze-r2.ts --sample
+```
+
+**After importing to R2:**
+```bash
+# Materialize ticks to candles (if needed for PostgreSQL queries)
+npx tsx src/scripts/materialize-candles.ts EURUSD 2024-01-01 2024-12-31
+
+# Refresh materialized views (if using candles)
+npm run refresh-mvs
+```
+
+**See `R2_IMPORT_PROCESS.md` for complete guide with troubleshooting.**
+
+### TimescaleDB Import (LEGACY)
+
+**Import to PostgreSQL database** - Higher cost, but integrated with existing materialized views.
 
 ```bash
 # Import last 7 days of EURUSD
@@ -269,8 +340,7 @@ npm run import -- --symbol EURUSD --from 2024-03-01 --to 2024-03-31
 npm run import -- --symbol EURUSD --from 2024-01-01 --to 2024-12-31 --manage-indexes
 ```
 
-### After Importing
-
+**After importing to TimescaleDB:**
 ```bash
 # Refresh materialized views to include new data
 npm run refresh-mvs
@@ -375,12 +445,56 @@ npm run refresh-mvs
    - 100x faster than INSERT
    - Used in import pipeline
 
-## Recent Updates (Updated: 2025-01-25)
+## Recent Updates (Updated: 2025-11-19)
 
-### Major Features Added
+### R2 Data Lake Migration (Commit: 18be65e) - MAJOR ARCHITECTURE CHANGE
+
+**Why R2?** Cost reduction from $0.15/GB (PostgreSQL) to $0.015/GB (R2) = **10x cheaper storage**
+
+**New Architecture:**
+```
+Dukascopy → R2 Data Lake → On-demand Materialization → PostgreSQL Candles
+```
+
+**Core Components:**
+- `src/services/r2Client.ts` - S3-compatible client for Cloudflare R2
+- `src/scripts/import-to-r2.ts` - Direct Dukascopy → R2 import (skip database)
+- `src/scripts/materialize-candles.ts` - R2 → PostgreSQL candle aggregation
+- `src/scripts/backfill-r2.ts` - Migration tool (PostgreSQL → R2)
+- `src/scripts/analyze-r2.ts` - R2 data analysis and statistics
+
+**Data Flow:**
+1. **Import**: Fetch tick data from Dukascopy → Upload to R2 as JSON
+2. **Store**: Ticks stored in R2 with partitioned structure: `ticks/{SYMBOL}/{YYYY}/{MM}/{DD}/part-{timestamp}.json`
+3. **Materialize**: When candles needed, read from R2 → aggregate → store in PostgreSQL candles_5m
+4. **Query**: Read candles from PostgreSQL (fast) while ticks stay in R2 (cheap)
+
+**Import Statistics (as of 2025-11-19):**
+- **Total ticks in R2**: 157.8M+ ticks
+- **EURUSD**: 15.8M ticks (Feb 2024 - Jan 2025)
+- **Other major pairs**: 1-2.7M ticks each (Oct-Nov 2024)
+- **Storage cost**: ~$0.015/month per GB vs $0.15/month in PostgreSQL
+
+**Critical Fixes:**
+1. **Infinite retry loop** (src/scripts/import-to-r2.ts:80, 141)
+   - Changed `failAfterRetryCount: false` → `true`
+   - Prevented 18+ hour hangs when Dukascopy unavailable
+   - Saved 72+ hours of wasted compute time
+
+2. **BufferFetcher error handling** (src/scripts/import-to-r2.ts:169)
+   - Check both `error.message` AND `error.stack`
+   - Gracefully skip dates with no data
+   - Allows full-year imports to complete
+
+**Documentation:**
+- `R2_IMPORT_PROCESS.md` - Complete R2 import guide with troubleshooting
+- `R2_DEPLOYMENT_GUIDE.md` - Production deployment guide
+- See troubleshooting section below for detailed error analysis
+
+### Historical Data Import System (TimescaleDB - LEGACY)
 
 **Historical Data Import System** (Commits: 2b59e35, 900a6a9)
-- Professional CLI tool for importing Dukascopy tick data
+- Professional CLI tool for importing Dukascopy tick data to TimescaleDB
 - Smart index management for 5-10x faster bulk imports
 - Automatic materialized view refresh
 - Support for multiple symbols and date ranges
@@ -399,14 +513,22 @@ npm run refresh-mvs
 
 ### New Documentation
 
+- `R2_IMPORT_PROCESS.md` - R2 data lake import guide (RECOMMENDED)
+- `R2_DEPLOYMENT_GUIDE.md` - R2 deployment and production setup
 - `API_USAGE.md` - Complete REST API client guide with examples
-- `IMPORT_GUIDE.md` - Historical data import instructions
+- `IMPORT_GUIDE.md` - Historical data import instructions (TimescaleDB legacy)
 - `INDEX_MANAGEMENT.md` - Database performance optimization guide
 - `.claude/problems/index-performance.md` - Technical analysis of import performance
 
 ### Scripts Added
 
 ```bash
+# R2 Data Lake (RECOMMENDED)
+npx tsx src/scripts/import-to-r2.ts EURUSD 2024-01-01 2024-12-31
+npx tsx src/scripts/materialize-candles.ts EURUSD 2024-01-01 2024-12-31
+npx tsx src/scripts/analyze-r2.ts --sample
+
+# TimescaleDB (LEGACY)
 npm run import              # Import historical tick data
 npm run drop-indexes        # Drop indexes before bulk import
 npm run recreate-indexes    # Recreate indexes after import
@@ -419,25 +541,42 @@ npm run refresh-mvs         # Refresh materialized views
 - Professional index management strategy
 - Materialized views for pre-aggregated candles
 - UNIQUE constraint on (symbol, time) for deduplication
+- R2 integration for cost-effective tick storage
 
 ### Import Performance
 
-**Before optimization:**
-- ~10-15 seconds per 1000-row batch
-- ~3 hours for 1 month of data
+**R2 Import (RECOMMENDED):**
+- Direct import: Dukascopy → R2 (no database overhead)
+- ~1-2 minutes per day of tick data
+- ~30-60 minutes for 1 month
+- Parallel processing: 6 symbols simultaneously
+- Storage cost: $0.015/GB/month
 
-**After optimization:**
-- ~1-2 seconds per batch (5-10x faster)
-- ~25 minutes for 1 month of data
+**TimescaleDB Import (LEGACY):**
+- Before optimization: ~3 hours for 1 month
+- After optimization: ~25 minutes for 1 month
+- Storage cost: $0.15/GB/month (10x more expensive)
 
 ## Important Notes
 
 ### Data Import Best Practices
 
+**R2 Data Lake (RECOMMENDED):**
+1. **Use R2 for new data** - 10x cheaper storage ($0.015/GB vs $0.15/GB)
+2. **Import in parallel** - Use `./parallel-import.sh` for 6 symbols simultaneously
+3. **Set UV_THREADPOOL_SIZE=128** - Prevents DNS exhaustion during parallel imports
+4. **Monitor for hangs** - Check process state with `ps -p <PID> -o pid,stat,wchan,etime`
+5. **See R2_IMPORT_PROCESS.md** - Complete guide with all known issues and fixes
+
+**TimescaleDB (LEGACY):**
+1. **Use `--manage-indexes` for large imports** - 5-10x performance improvement
+2. **Refresh materialized views after imports** - `npm run refresh-mvs`
+3. **Import in chunks** - Default 7-day chunks for optimal memory usage
+
+**General:**
 1. **Always check metadata first** - Don't assume data exists up to current date
-2. **Use `--manage-indexes` for large imports** - 5-10x performance improvement
-3. **Refresh materialized views after imports** - `npm run refresh-mvs`
-4. **Import in chunks** - Default 7-day chunks for optimal memory usage
+2. **Test on single day first** - Verify import works before running full-year imports
+3. **Markets are closed on weekends** - No forex data on Saturdays/Sundays
 
 ### API Usage
 
