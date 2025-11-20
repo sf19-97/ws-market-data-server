@@ -2,12 +2,9 @@
 import dotenv from 'dotenv';
 import { getPool, closePool } from '../utils/database.js';
 import { getR2Client, Tick } from '../services/r2Client.js';
-import { createLogger } from '../utils/logger.js';
 
 // Load environment variables
 dotenv.config();
-
-const logger = createLogger();
 
 /**
  * Backfill R2 with historical ticks from market_ticks table

@@ -284,7 +284,6 @@ async function main() {
   const args = process.argv.slice(2);
   const sample = args.includes('--sample');
   const outputFile = args.find(arg => arg.startsWith('--output='))?.split('=')[1];
-  const symbolFilter = args.find(arg => arg.startsWith('--symbol='))?.split('=')[1];
 
   const analyzer = new R2Analyzer();
 

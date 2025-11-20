@@ -1,0 +1,389 @@
+import { Pool } from 'pg';
+import { R2Client, Tick } from './r2Client.js';
+import { createLogger } from '../utils/logger.js';
+
+const logger = createLogger();
+
+export interface Candle {
+  time: Date;
+  symbol: string;
+  open: number;
+  high: number;
+  low: number;
+  close: number;
+  volume: number;
+  trades: number;
+}
+
+export interface CandleCoverage {
+  covered: boolean;
+  missingRanges: Array<{ start: Date; end: Date }>;
+  totalDays: number;
+  coveredDays: number;
+}
+
+/**
+ * MaterializationService - Converts R2 tick data into PostgreSQL 5-minute candles
+ *
+ * Architecture:
+ * - R2 stores raw ticks (cheap storage)
+ * - PostgreSQL stores 5m candles (base aggregation layer)
+ * - Higher timeframes (15m, 1h, 4h, 12h) computed from 5m candles via materialized views
+ */
+export class MaterializationService {
+  constructor(
+    private pool: Pool,
+    private r2Client: R2Client
+  ) {}
+
+  /**
+   * Build 5-minute candles from tick data
+   * Uses midpoint price (bid + ask) / 2
+   */
+  private buildFiveMinuteCandles(symbol: string, ticks: Tick[]): Candle[] {
+    if (ticks.length === 0) return [];
+
+    const candles: Candle[] = [];
+    const bucketSizeSeconds = 5 * 60; // 5 minutes in seconds
+
+    let currentBucketStart: number | null = null;
+    let currentCandle: Partial<Candle> | null = null;
+    let tickCount = 0;
+
+    for (const tick of ticks) {
+      // Calculate bucket start time (floor to nearest 5 minutes)
+      const bucketStart = Math.floor(tick.timestamp / bucketSizeSeconds) * bucketSizeSeconds;
+
+      // New bucket? Save previous candle and start new one
+      if (bucketStart !== currentBucketStart) {
+        if (currentCandle && currentBucketStart !== null) {
+          candles.push({
+            time: new Date(currentBucketStart * 1000), // Convert to milliseconds for Date
+            symbol,
+            open: currentCandle.open!,
+            high: currentCandle.high!,
+            low: currentCandle.low!,
+            close: currentCandle.close!,
+            volume: 0, // We don't have volume data from Dukascopy ticks
+            trades: tickCount
+          });
+        }
+
+        // Start new candle
+        const midPrice = (tick.bid + tick.ask) / 2;
+        currentBucketStart = bucketStart;
+        currentCandle = {
+          open: midPrice,
+          high: midPrice,
+          low: midPrice,
+          close: midPrice
+        };
+        tickCount = 1;
+      } else {
+        // Update current candle
+        const midPrice = (tick.bid + tick.ask) / 2;
+        currentCandle!.high = Math.max(currentCandle!.high!, midPrice);
+        currentCandle!.low = Math.min(currentCandle!.low!, midPrice);
+        currentCandle!.close = midPrice;
+        tickCount++;
+      }
+    }
+
+    // Save last candle
+    if (currentCandle && currentBucketStart !== null) {
+      candles.push({
+        time: new Date(currentBucketStart * 1000),
+        symbol,
+        open: currentCandle.open!,
+        high: currentCandle.high!,
+        low: currentCandle.low!,
+        close: currentCandle.close!,
+        volume: 0,
+        trades: tickCount
+      });
+    }
+
+    return candles;
+  }
+
+  /**
+   * Insert candles into candles_5m table with ON CONFLICT upsert
+   */
+  private async insertCandles(candles: Candle[]): Promise<void> {
+    if (candles.length === 0) {
+      logger.debug('No candles to insert');
+      return;
+    }
+
+    logger.debug({ candleCount: candles.length }, 'Inserting candles into PostgreSQL');
+
+    const client = await this.pool.connect();
+
+    try {
+      // Build batch INSERT with ON CONFLICT
+      const values: any[] = [];
+      const placeholders: string[] = [];
+
+      candles.forEach((candle, idx) => {
+        const baseIdx = idx * 8;
+        placeholders.push(
+          `($${baseIdx + 1}, $${baseIdx + 2}, $${baseIdx + 3}, $${baseIdx + 4}, $${baseIdx + 5}, $${baseIdx + 6}, $${baseIdx + 7}, $${baseIdx + 8})`
+        );
+        values.push(
+          candle.time,
+          candle.symbol,
+          candle.open,
+          candle.high,
+          candle.low,
+          candle.close,
+          candle.volume,
+          candle.trades
+        );
+      });
+
+      const query = `
+        INSERT INTO candles_5m (time, symbol, open, high, low, close, volume, trades)
+        VALUES ${placeholders.join(', ')}
+        ON CONFLICT (symbol, time) DO UPDATE SET
+          open = EXCLUDED.open,
+          high = EXCLUDED.high,
+          low = EXCLUDED.low,
+          close = EXCLUDED.close,
+          volume = EXCLUDED.volume,
+          trades = EXCLUDED.trades
+      `;
+
+      const result = await client.query(query, values);
+      const rowCount = result.rowCount || 0;
+
+      logger.info({ rowCount }, 'Inserted/updated candles');
+
+    } catch (error) {
+      logger.error({ error }, 'Failed to insert candles');
+      throw error;
+    } finally {
+      client.release();
+    }
+  }
+
+  /**
+   * Materialize 5-minute candles for a single day
+   *
+   * @param symbol Trading symbol (e.g., "EURUSD")
+   * @param date Date to materialize
+   */
+  async materialize5mCandlesForDay(symbol: string, date: Date): Promise<number> {
+    logger.debug({ symbol, date }, 'Materializing 5m candles for day');
+
+    try {
+      // Step 1: Download all ticks from R2
+      const ticks = await this.r2Client.downloadAllTicks(symbol, date);
+
+      if (ticks.length === 0) {
+        logger.warn({ symbol, date }, 'No ticks found in R2');
+        return 0;
+      }
+
+      // Step 2: Build 5-minute candles
+      const candles = this.buildFiveMinuteCandles(symbol, ticks);
+      logger.debug({ symbol, date, candleCount: candles.length }, 'Built candles from ticks');
+
+      // Step 3: Insert into PostgreSQL
+      await this.insertCandles(candles);
+
+      return candles.length;
+
+    } catch (error: any) {
+      logger.error({ error, symbol, date }, 'Materialization failed for day');
+      throw error;
+    }
+  }
+
+  /**
+   * Materialize 5-minute candles for a date range
+   *
+   * @param symbol Trading symbol (e.g., "EURUSD")
+   * @param startDate Start date (inclusive)
+   * @param endDate End date (inclusive)
+   * @returns Total number of candles materialized
+   */
+  async materialize5mCandles(symbol: string, startDate: Date, endDate: Date): Promise<number> {
+    logger.info({ symbol, startDate, endDate }, 'Starting 5m candle materialization');
+
+    let currentDate = new Date(startDate);
+    let totalCandles = 0;
+    let processedDays = 0;
+
+    while (currentDate <= endDate) {
+      const candleCount = await this.materialize5mCandlesForDay(symbol, new Date(currentDate));
+      totalCandles += candleCount;
+      processedDays++;
+
+      // Move to next day
+      currentDate = new Date(currentDate);
+      currentDate.setDate(currentDate.getDate() + 1);
+
+      // Small delay to avoid hammering R2
+      if (currentDate <= endDate) {
+        await new Promise(resolve => setTimeout(resolve, 500));
+      }
+    }
+
+    logger.info(
+      { symbol, startDate, endDate, processedDays, totalCandles },
+      'Completed 5m candle materialization'
+    );
+
+    return totalCandles;
+  }
+
+  /**
+   * Check which days have 5m candles in PostgreSQL for a date range
+   *
+   * @param symbol Trading symbol
+   * @param startDate Start date (inclusive)
+   * @param endDate End date (inclusive)
+   * @returns Coverage information
+   */
+  async getCandleCoverage(
+    symbol: string,
+    startDate: Date,
+    endDate: Date
+  ): Promise<CandleCoverage> {
+    logger.debug({ symbol, startDate, endDate }, 'Checking candle coverage');
+
+    const client = await this.pool.connect();
+
+    try {
+      // Query to find all distinct days with candles
+      const result = await client.query(
+        `
+        SELECT DISTINCT DATE(time) as day
+        FROM candles_5m
+        WHERE symbol = $1
+          AND time >= $2
+          AND time < $3 + INTERVAL '1 day'
+        ORDER BY day
+        `,
+        [symbol, startDate, endDate]
+      );
+
+      const coveredDays = new Set(result.rows.map(row => row.day.toISOString().split('T')[0]));
+
+      // Calculate all days in range
+      const allDays: string[] = [];
+      let currentDate = new Date(startDate);
+
+      while (currentDate <= endDate) {
+        allDays.push(currentDate.toISOString().split('T')[0]);
+        currentDate = new Date(currentDate);
+        currentDate.setDate(currentDate.getDate() + 1);
+      }
+
+      // Find missing days
+      const missingDays = allDays.filter(day => !coveredDays.has(day));
+
+      // Build missing ranges
+      const missingRanges: Array<{ start: Date; end: Date }> = [];
+
+      if (missingDays.length > 0) {
+        let rangeStart = new Date(missingDays[0]);
+        let rangeEnd = new Date(missingDays[0]);
+
+        for (let i = 1; i < missingDays.length; i++) {
+          const currentDay = new Date(missingDays[i]);
+          const dayDiff = (currentDay.getTime() - rangeEnd.getTime()) / (1000 * 60 * 60 * 24);
+
+          if (dayDiff === 1) {
+            // Consecutive day, extend range
+            rangeEnd = currentDay;
+          } else {
+            // Gap, save current range and start new one
+            missingRanges.push({ start: rangeStart, end: rangeEnd });
+            rangeStart = currentDay;
+            rangeEnd = currentDay;
+          }
+        }
+
+        // Save last range
+        missingRanges.push({ start: rangeStart, end: rangeEnd });
+      }
+
+      const coverage: CandleCoverage = {
+        covered: missingRanges.length === 0,
+        missingRanges,
+        totalDays: allDays.length,
+        coveredDays: coveredDays.size
+      };
+
+      logger.debug(
+        {
+          symbol,
+          totalDays: coverage.totalDays,
+          coveredDays: coverage.coveredDays,
+          missingCount: missingRanges.length
+        },
+        'Coverage check complete'
+      );
+
+      return coverage;
+
+    } catch (error) {
+      logger.error({ error, symbol, startDate, endDate }, 'Coverage check failed');
+      throw error;
+    } finally {
+      client.release();
+    }
+  }
+
+  /**
+   * Check if R2 has tick data for a date range
+   *
+   * @param symbol Trading symbol
+   * @param startDate Start date (inclusive)
+   * @param endDate End date (inclusive)
+   * @returns True if ticks exist in R2
+   */
+  async checkR2Coverage(symbol: string, startDate: Date, endDate: Date): Promise<boolean> {
+    return await this.r2Client.hasTicksForDateRange(symbol, startDate, endDate);
+  }
+
+  /**
+   * Refresh materialized views for higher timeframes
+   * NOTE: This can be slow and locks the views during refresh
+   *
+   * @param timeframes Optional list of timeframes to refresh (default: all)
+   */
+  async refreshMaterializedViews(timeframes?: string[]): Promise<void> {
+    const viewMap: Record<string, string> = {
+      '15m': 'candles_15m',
+      '1h': 'candles_1h',
+      '4h': 'candles_4h',
+      '12h': 'candles_12h'
+    };
+
+    const toRefresh = timeframes || Object.keys(viewMap);
+
+    logger.info({ timeframes: toRefresh }, 'Refreshing materialized views');
+
+    for (const tf of toRefresh) {
+      const viewName = viewMap[tf];
+
+      if (!viewName) {
+        logger.warn({ timeframe: tf }, 'Unknown timeframe, skipping');
+        continue;
+      }
+
+      try {
+        logger.debug({ viewName }, 'Refreshing materialized view');
+
+        await this.pool.query(`REFRESH MATERIALIZED VIEW CONCURRENTLY ${viewName}`);
+
+        logger.info({ viewName }, 'Materialized view refreshed');
+      } catch (error) {
+        logger.error({ error, viewName }, 'Failed to refresh materialized view');
+        throw error;
+      }
+    }
+  }
+}

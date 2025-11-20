@@ -2,9 +2,19 @@ import { Pool } from 'pg';
 import { Candle, Timeframe } from '../types/index.js';
 import { TIMEFRAME_VIEW_MAP, TIMEFRAME_INTERVAL_MAP } from '../utils/constants.js';
 import { ApiError, validateMaterializedViewName } from '../middleware/validation.js';
+import { MaterializationService } from './materializationService.js';
+import { createLogger } from '../utils/logger.js';
+
+const logger = createLogger();
 
 /**
  * Service for fetching historical OHLC candle data from the database.
+ *
+ * With auto-triggering materialization:
+ * - Checks if 5m candles exist in PostgreSQL for requested range
+ * - If missing, automatically materializes from R2 data lake
+ * - For higher timeframes (15m, 1h, 4h, 12h), refreshes materialized views
+ * - Then returns candles with sub-second query performance
  *
  * Intelligently uses pre-computed materialized views for 5m, 15m, 1h, 4h, and 12h timeframes
  * to provide sub-second query response times. For 1m timeframe, aggregates raw tick data on-demand.
@@ -13,7 +23,7 @@ import { ApiError, validateMaterializedViewName } from '../middleware/validation
  *
  * @example
  * ```typescript
- * const service = new CandlesService(pool);
+ * const service = new CandlesService(pool, materializationService);
  * const candles = await service.getCandles('EURUSD', '1h', 1704067200, 1704153600);
  * console.log(`Retrieved ${candles.length} hourly candles`);
  * ```
@@ -23,8 +33,12 @@ export class CandlesService {
    * Creates a new CandlesService instance.
    *
    * @param pool - PostgreSQL connection pool for database queries
+   * @param materializationService - Optional service for auto-materialization from R2
    */
-  constructor(private pool: Pool) {}
+  constructor(
+    private pool: Pool,
+    private materializationService?: MaterializationService
+  ) {}
 
   /**
    * Retrieves historical OHLC candle data for a trading symbol.
@@ -60,6 +74,11 @@ export class CandlesService {
     from: number,
     to: number
   ): Promise<Candle[]> {
+    // Auto-trigger materialization if service is configured
+    if (this.materializationService) {
+      await this.ensureCandles5mExist(symbol, from, to, timeframe);
+    }
+
     const viewName = TIMEFRAME_VIEW_MAP[timeframe];
 
     let query: string;
@@ -148,5 +167,71 @@ export class CandlesService {
     `, [symbol, from, to]);
 
     return parseInt(result.rows[0].count);
+  }
+
+  /**
+   * Ensure 5m candles exist for the requested range
+   * Auto-triggers materialization from R2 if missing
+   *
+   * @private
+   */
+  private async ensureCandles5mExist(
+    symbol: string,
+    fromTimestamp: number,
+    toTimestamp: number,
+    timeframe: Timeframe
+  ): Promise<void> {
+    const startDate = new Date(fromTimestamp * 1000);
+    const endDate = new Date(toTimestamp * 1000);
+
+    logger.debug(
+      { symbol, startDate, endDate, timeframe },
+      'Checking 5m candle coverage'
+    );
+
+    // Step 1: Check if 5m candles exist for this range
+    const coverage = await this.materializationService!.getCandleCoverage(
+      symbol,
+      startDate,
+      endDate
+    );
+
+    if (coverage.covered) {
+      logger.debug({ symbol }, '5m candles already exist, skipping materialization');
+      return;
+    }
+
+    // Step 2: If missing, materialize from R2
+    logger.info(
+      {
+        symbol,
+        missingDays: coverage.totalDays - coverage.coveredDays,
+        missingRanges: coverage.missingRanges.length
+      },
+      'Materializing missing 5m candles from R2'
+    );
+
+    // Materialize each missing range
+    for (const range of coverage.missingRanges) {
+      logger.debug(
+        { symbol, start: range.start, end: range.end },
+        'Materializing date range'
+      );
+
+      await this.materializationService!.materialize5mCandles(
+        symbol,
+        range.start,
+        range.end
+      );
+    }
+
+    // Step 3: For higher timeframes, refresh materialized views
+    if (timeframe !== '5m' && TIMEFRAME_VIEW_MAP[timeframe]) {
+      logger.info({ timeframe }, 'Refreshing materialized view for higher timeframe');
+
+      await this.materializationService!.refreshMaterializedViews([timeframe]);
+    }
+
+    logger.info({ symbol, timeframe }, 'Materialization complete');
   }
 }

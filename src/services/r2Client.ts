@@ -1,4 +1,10 @@
-import { S3Client, PutObjectCommand } from '@aws-sdk/client-s3';
+import {
+  S3Client,
+  PutObjectCommand,
+  ListObjectsV2Command,
+  GetObjectCommand,
+  ListObjectsV2CommandOutput
+} from '@aws-sdk/client-s3';
 import { createLogger } from '../utils/logger.js';
 
 const logger = createLogger();
@@ -75,6 +81,142 @@ export class R2Client {
       logger.error({ error, key }, 'Failed to upload ticks to R2');
       throw error;
     }
+  }
+
+  /**
+   * List all tick files for a given symbol and date from R2
+   * Handles pagination (max 1000 objects per request)
+   *
+   * @param symbol Trading symbol (e.g., "EURUSD")
+   * @param date Date to list files for
+   * @returns Array of R2 object keys
+   */
+  async listTickFiles(symbol: string, date: Date): Promise<string[]> {
+    const year = date.getFullYear();
+    const month = String(date.getMonth() + 1).padStart(2, '0');
+    const day = String(date.getDate()).padStart(2, '0');
+
+    const prefix = `ticks/${symbol}/${year}/${month}/${day}/`;
+
+    logger.debug({ prefix }, 'Listing tick files from R2');
+
+    const keys: string[] = [];
+    let continuationToken: string | undefined = undefined;
+
+    do {
+      const command: ListObjectsV2Command = new ListObjectsV2Command({
+        Bucket: this.bucketName,
+        Prefix: prefix,
+        ContinuationToken: continuationToken
+      });
+
+      const response: ListObjectsV2CommandOutput = await this.s3.send(command);
+
+      if (response.Contents) {
+        for (const object of response.Contents) {
+          if (object.Key) {
+            keys.push(object.Key);
+          }
+        }
+      }
+
+      continuationToken = response.NextContinuationToken;
+    } while (continuationToken); // Keep paginating until no more results
+
+    logger.debug({ prefix, fileCount: keys.length }, 'Listed tick files');
+    return keys;
+  }
+
+  /**
+   * Download and parse a single tick file from R2
+   *
+   * @param key R2 object key
+   * @returns Array of ticks from the file
+   */
+  async downloadTickFile(key: string): Promise<Tick[]> {
+    const command = new GetObjectCommand({
+      Bucket: this.bucketName,
+      Key: key
+    });
+
+    try {
+      const response = await this.s3.send(command);
+
+      if (!response.Body) {
+        throw new Error(`No body in response for key: ${key}`);
+      }
+
+      // Convert stream to string
+      const bodyString = await response.Body.transformToString();
+      const ticks: Tick[] = JSON.parse(bodyString);
+
+      logger.debug({ key, tickCount: ticks.length }, 'Downloaded tick file');
+      return ticks;
+    } catch (error) {
+      logger.error({ error, key }, 'Failed to download tick file from R2');
+      throw error;
+    }
+  }
+
+  /**
+   * Download and merge all tick files for a given symbol and date
+   * Automatically sorts ticks by timestamp
+   *
+   * @param symbol Trading symbol (e.g., "EURUSD")
+   * @param date Date to download ticks for
+   * @returns Sorted array of all ticks for the date
+   */
+  async downloadAllTicks(symbol: string, date: Date): Promise<Tick[]> {
+    const keys = await this.listTickFiles(symbol, date);
+
+    if (keys.length === 0) {
+      logger.debug({ symbol, date }, 'No tick files found');
+      return [];
+    }
+
+    logger.debug({ symbol, date, fileCount: keys.length }, 'Downloading tick files');
+
+    const allTicks: Tick[] = [];
+
+    for (const key of keys) {
+      const ticks = await this.downloadTickFile(key);
+      // Avoid stack overflow from spread operator with large arrays
+      for (const tick of ticks) {
+        allTicks.push(tick);
+      }
+    }
+
+    // Sort by timestamp (CRITICAL for candle building)
+    allTicks.sort((a, b) => a.timestamp - b.timestamp);
+
+    logger.info({ symbol, date, tickCount: allTicks.length }, 'Downloaded and merged all ticks');
+    return allTicks;
+  }
+
+  /**
+   * Check if tick data exists in R2 for a given date range
+   *
+   * @param symbol Trading symbol (e.g., "EURUSD")
+   * @param startDate Start date (inclusive)
+   * @param endDate End date (inclusive)
+   * @returns True if at least one tick file exists for any date in the range
+   */
+  async hasTicksForDateRange(symbol: string, startDate: Date, endDate: Date): Promise<boolean> {
+    let currentDate = new Date(startDate);
+
+    while (currentDate <= endDate) {
+      const files = await this.listTickFiles(symbol, currentDate);
+
+      if (files.length > 0) {
+        return true; // Found at least one file
+      }
+
+      // Move to next day
+      currentDate = new Date(currentDate);
+      currentDate.setDate(currentDate.getDate() + 1);
+    }
+
+    return false; // No files found in entire range
   }
 
   /**

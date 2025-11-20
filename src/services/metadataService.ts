@@ -26,8 +26,8 @@ export class MetadataService {
   /**
    * Retrieves metadata for a specific trading symbol.
    *
-   * Queries the database to get earliest/latest timestamps, total tick count,
-   * and available timeframes for the specified symbol.
+   * Queries both candles_5m (R2 materialized data) and market_ticks (legacy data).
+   * Merges results to provide complete date range and candle count.
    *
    * @param symbol - Normalized symbol identifier (e.g., 'EURUSD', 'GBPUSD')
    * @returns Symbol metadata object, or null if symbol doesn't exist
@@ -41,7 +41,20 @@ export class MetadataService {
    * ```
    */
   async getSymbolMetadata(symbol: string): Promise<SymbolMetadata | null> {
-    const result = await this.pool.query(`
+    // Query candles_5m (R2 materialized data)
+    const candlesResult = await this.pool.query(`
+      SELECT
+        symbol,
+        MIN(time) as earliest,
+        MAX(time) as latest,
+        COUNT(*) as candle_count
+      FROM candles_5m
+      WHERE symbol = $1
+      GROUP BY symbol
+    `, [symbol]);
+
+    // Query market_ticks (legacy data) as fallback
+    const ticksResult = await this.pool.query(`
       SELECT
         symbol,
         MIN(time) as earliest,
@@ -52,16 +65,42 @@ export class MetadataService {
       GROUP BY symbol
     `, [symbol]);
 
-    if (result.rows.length === 0) {
+    // If no data in either table, symbol doesn't exist
+    if (candlesResult.rows.length === 0 && ticksResult.rows.length === 0) {
       return null;
     }
 
-    const row = result.rows[0];
+    // Merge results - use earliest from either source, latest from either source
+    let earliest: Date | null = null;
+    let latest: Date | null = null;
+    let candleCount = 0;
+
+    if (candlesResult.rows.length > 0) {
+      const row = candlesResult.rows[0];
+      earliest = row.earliest;
+      latest = row.latest;
+      candleCount = parseInt(row.candle_count);
+    }
+
+    if (ticksResult.rows.length > 0) {
+      const row = ticksResult.rows[0];
+      if (!earliest || row.earliest < earliest) {
+        earliest = row.earliest;
+      }
+      if (!latest || row.latest > latest) {
+        latest = row.latest;
+      }
+    }
+
+    if (!earliest || !latest) {
+      return null;
+    }
+
     return {
-      symbol: row.symbol,
-      earliest: Math.floor(new Date(row.earliest).getTime() / 1000),
-      latest: Math.floor(new Date(row.latest).getTime() / 1000),
-      tick_count: parseInt(row.tick_count),
+      symbol,
+      earliest: Math.floor(new Date(earliest).getTime() / 1000),
+      latest: Math.floor(new Date(latest).getTime() / 1000),
+      tick_count: candleCount, // Using candle count as proxy for tick count
       timeframes: Array.from(TIMEFRAMES)
     };
   }
@@ -110,10 +149,11 @@ export class MetadataService {
   /**
    * Checks if a symbol exists in the market data database.
    *
-   * Performs an optimized query using LIMIT 1 for fast existence checking.
+   * Checks both candles_5m (R2 materialized data) and market_ticks (legacy data).
+   * Performs optimized queries using LIMIT 1 for fast existence checking.
    *
    * @param symbol - Normalized symbol identifier to check
-   * @returns True if at least one tick exists for the symbol, false otherwise
+   * @returns True if at least one candle or tick exists for the symbol, false otherwise
    *
    * @example
    * ```typescript
@@ -123,11 +163,23 @@ export class MetadataService {
    * ```
    */
   async symbolExists(symbol: string): Promise<boolean> {
-    const result = await this.pool.query(
+    // Check candles_5m first (R2 materialized data)
+    const candlesResult = await this.pool.query(
+      'SELECT 1 FROM candles_5m WHERE symbol = $1 LIMIT 1',
+      [symbol]
+    );
+
+    if (candlesResult.rows.length > 0) {
+      return true;
+    }
+
+    // Fall back to market_ticks (legacy data)
+    const ticksResult = await this.pool.query(
       'SELECT 1 FROM market_ticks WHERE symbol = $1 LIMIT 1',
       [symbol]
     );
-    return result.rows.length > 0;
+
+    return ticksResult.rows.length > 0;
   }
 
   /**
