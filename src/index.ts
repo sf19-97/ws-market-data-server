@@ -247,19 +247,6 @@ class MarketDataServer {
           // Normalize symbol format (remove slashes)
           const normalizedSymbol = sanitizeSymbol(symbol);
 
-          // Check if symbol exists in database
-          const symbolExists = await this.metadataService.symbolExists(normalizedSymbol);
-          if (!symbolExists) {
-            throw new ApiError(
-              404,
-              `Symbol '${normalizedSymbol}' not found in database`,
-              'SYMBOL_NOT_FOUND'
-            );
-          }
-
-          // Get available date range for this symbol
-          const dateRange = await this.metadataService.getSymbolDateRange(normalizedSymbol);
-
           // Generate ETag for browser caching
           const cacheKey = `${normalizedSymbol}-${timeframe}-${from}-${to}`;
           const etag = crypto.createHash('md5').update(cacheKey).digest('hex');
@@ -286,16 +273,6 @@ class MarketDataServer {
             'Vary': 'Accept-Encoding', // Important for CDNs
             'Last-Modified': new Date().toUTCString()
           });
-
-          // Add helpful headers when no data is returned
-          if (candles.length === 0 && dateRange) {
-            res.set({
-              'X-Data-Available': 'false',
-              'X-Available-From': new Date(dateRange.earliest * 1000).toISOString(),
-              'X-Available-To': new Date(dateRange.latest * 1000).toISOString(),
-              'Warning': '199 - "No data available for requested date range. Check X-Available-From and X-Available-To headers for available data range."'
-            });
-          }
 
           res.json(candles);
         })

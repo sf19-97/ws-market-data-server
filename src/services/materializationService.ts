@@ -262,7 +262,7 @@ export class MaterializationService {
         FROM candles_5m
         WHERE symbol = $1
           AND time >= $2
-          AND time < $3 + INTERVAL '1 day'
+          AND time < $3::timestamp + INTERVAL '1 day'
         ORDER BY day
         `,
         [symbol, startDate, endDate]
