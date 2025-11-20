@@ -1,18 +1,19 @@
 #!/usr/bin/env tsx
 import { getHistoricalRates } from 'dukascopy-node';
 import dotenv from 'dotenv';
-import { getR2Client, Tick } from '../services/r2Client.js';
+import { getR2Client, Tick, Candle } from '../services/r2Client.js';
 
 // Load environment variables
 dotenv.config();
 
 /**
- * Import ticks directly from Dukascopy to R2 (skip Postgres entirely)
+ * Import 5-minute candles directly from Dukascopy to R2 (skip Postgres entirely)
  *
- * This is the PURE data lake approach:
- * 1. Fetch from Dukascopy
- * 2. Store in R2 (cheap storage)
- * 3. Materialize to candles on-demand
+ * This is the OPTIMIZED data lake approach:
+ * 1. Fetch ticks from Dukascopy
+ * 2. Build 5-minute candles (aggregate once)
+ * 3. Store candles in R2 (cheap storage, 10x smaller than ticks)
+ * 4. Materialize to PostgreSQL on-demand (just copy, no aggregation)
  */
 class DukascopyToR2Importer {
   private r2Client = getR2Client();
@@ -24,7 +25,77 @@ class DukascopyToR2Importer {
   }
 
   /**
-   * Import ticks for a date range from Dukascopy directly to R2
+   * Build 5-minute candles from tick data
+   * Uses midpoint price (bid + ask) / 2
+   */
+  private buildFiveMinuteCandles(symbol: string, ticks: Tick[]): Candle[] {
+    if (ticks.length === 0) return [];
+
+    const candles: Candle[] = [];
+    const bucketSizeSeconds = 5 * 60; // 5 minutes in seconds
+
+    let currentBucketStart: number | null = null;
+    let currentCandle: Partial<Candle> | null = null;
+    let tickCount = 0;
+
+    for (const tick of ticks) {
+      // Calculate bucket start time (floor to nearest 5 minutes)
+      const bucketStart = Math.floor(tick.timestamp / bucketSizeSeconds) * bucketSizeSeconds;
+
+      // New bucket? Save previous candle and start new one
+      if (bucketStart !== currentBucketStart) {
+        if (currentCandle && currentBucketStart !== null) {
+          candles.push({
+            time: new Date(currentBucketStart * 1000), // Convert to milliseconds for Date
+            symbol,
+            open: currentCandle.open!,
+            high: currentCandle.high!,
+            low: currentCandle.low!,
+            close: currentCandle.close!,
+            volume: 0, // We don't have volume data from Dukascopy ticks
+            trades: tickCount
+          });
+        }
+
+        // Start new candle
+        const midPrice = (tick.bid + tick.ask) / 2;
+        currentBucketStart = bucketStart;
+        currentCandle = {
+          open: midPrice,
+          high: midPrice,
+          low: midPrice,
+          close: midPrice
+        };
+        tickCount = 1;
+      } else {
+        // Update current candle
+        const midPrice = (tick.bid + tick.ask) / 2;
+        currentCandle!.high = Math.max(currentCandle!.high!, midPrice);
+        currentCandle!.low = Math.min(currentCandle!.low!, midPrice);
+        currentCandle!.close = midPrice;
+        tickCount++;
+      }
+    }
+
+    // Save last candle
+    if (currentCandle && currentBucketStart !== null) {
+      candles.push({
+        time: new Date(currentBucketStart * 1000),
+        symbol,
+        open: currentCandle.open!,
+        high: currentCandle.high!,
+        low: currentCandle.low!,
+        close: currentCandle.close!,
+        volume: 0,
+        trades: tickCount
+      });
+    }
+
+    return candles;
+  }
+
+  /**
+   * Import 5-minute candles for a date range from Dukascopy to R2
    */
   async import(
     symbol: string,
@@ -95,9 +166,13 @@ class DukascopyToR2Importer {
           ask: tick.askPrice
         }));
 
-        // Upload to R2 (use the chunk start date for partitioning)
+        // Build 5-minute candles
+        const candles = this.buildFiveMinuteCandles(symbol, ticks);
+        console.log(`   🕯️  Built ${candles.length} 5-minute candles`);
+
+        // Upload candles to R2 (use the chunk start date for partitioning)
         const chunkDate = new Date(currentDate);
-        const key = await this.r2Client!.uploadTicks(symbol, chunkDate, ticks);
+        const key = await this.r2Client!.uploadCandles(symbol, chunkDate, candles);
         console.log(`   📤 Uploaded to R2: ${key}`);
 
         totalTicks += ticks.length;
@@ -155,8 +230,12 @@ class DukascopyToR2Importer {
               ask: tick.askPrice
             }));
 
+            // Build 5-minute candles
+            const candles = this.buildFiveMinuteCandles(symbol, ticks);
+            console.log(`   🕯️  Built ${candles.length} 5-minute candles`);
+
             const chunkDate = new Date(currentDate);
-            const key = await this.r2Client!.uploadTicks(symbol, chunkDate, ticks);
+            const key = await this.r2Client!.uploadCandles(symbol, chunkDate, candles);
             console.log(`   📤 Uploaded to R2: ${key}`);
 
             totalTicks += ticks.length;

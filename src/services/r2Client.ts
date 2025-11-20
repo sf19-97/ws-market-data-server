@@ -15,11 +15,23 @@ export interface Tick {
   ask: number;
 }
 
+export interface Candle {
+  time: Date;
+  symbol: string;
+  open: number;
+  high: number;
+  low: number;
+  close: number;
+  volume: number;
+  trades: number;
+}
+
 /**
- * Cloudflare R2 Client for uploading tick data to the data lake
+ * Cloudflare R2 Client for uploading tick and candle data to the data lake
  *
- * Uploads batches of ticks to R2 storage in the following structure:
- * ticks/{SYMBOL}/{YYYY}/{MM}/{DD}/part-{timestamp}.json
+ * Data structure:
+ * - Ticks: ticks/{SYMBOL}/{YYYY}/{MM}/{DD}/part-{timestamp}.json
+ * - Candles: candles/5m/{SYMBOL}/{YYYY}/{MM}/{DD}/part-{timestamp}.json
  */
 export class R2Client {
   private s3: S3Client;
@@ -84,6 +96,39 @@ export class R2Client {
   }
 
   /**
+   * Upload a batch of 5-minute candles to R2
+   *
+   * @param symbol Trading symbol (e.g., "EURUSD")
+   * @param date Date for partitioning
+   * @param candles Array of candles to upload
+   * @returns Promise resolving to the R2 key
+   */
+  async uploadCandles(symbol: string, date: Date, candles: Candle[]): Promise<string> {
+    const year = date.getFullYear();
+    const month = String(date.getMonth() + 1).padStart(2, '0');
+    const day = String(date.getDate()).padStart(2, '0');
+    const timestamp = Date.now();
+
+    const key = `candles/5m/${symbol}/${year}/${month}/${day}/part-${timestamp}.json`;
+
+    try {
+      await this.s3.send(new PutObjectCommand({
+        Bucket: this.bucketName,
+        Key: key,
+        Body: JSON.stringify(candles),
+        ContentType: 'application/json'
+      }));
+
+      logger.debug({ key, candleCount: candles.length }, 'Uploaded candles to R2');
+
+      return key;
+    } catch (error) {
+      logger.error({ error, key }, 'Failed to upload candles to R2');
+      throw error;
+    }
+  }
+
+  /**
    * List all tick files for a given symbol and date from R2
    * Handles pagination (max 1000 objects per request)
    *
@@ -128,6 +173,50 @@ export class R2Client {
   }
 
   /**
+   * List all 5-minute candle files for a given symbol and date from R2
+   * Handles pagination (max 1000 objects per request)
+   *
+   * @param symbol Trading symbol (e.g., "EURUSD")
+   * @param date Date to list files for
+   * @returns Array of R2 object keys
+   */
+  async listCandleFiles(symbol: string, date: Date): Promise<string[]> {
+    const year = date.getFullYear();
+    const month = String(date.getMonth() + 1).padStart(2, '0');
+    const day = String(date.getDate()).padStart(2, '0');
+
+    const prefix = `candles/5m/${symbol}/${year}/${month}/${day}/`;
+
+    logger.debug({ prefix }, 'Listing candle files from R2');
+
+    const keys: string[] = [];
+    let continuationToken: string | undefined = undefined;
+
+    do {
+      const command: ListObjectsV2Command = new ListObjectsV2Command({
+        Bucket: this.bucketName,
+        Prefix: prefix,
+        ContinuationToken: continuationToken
+      });
+
+      const response: ListObjectsV2CommandOutput = await this.s3.send(command);
+
+      if (response.Contents) {
+        for (const object of response.Contents) {
+          if (object.Key) {
+            keys.push(object.Key);
+          }
+        }
+      }
+
+      continuationToken = response.NextContinuationToken;
+    } while (continuationToken); // Keep paginating until no more results
+
+    logger.debug({ prefix, fileCount: keys.length }, 'Listed candle files');
+    return keys;
+  }
+
+  /**
    * Download and parse a single tick file from R2
    *
    * @param key R2 object key
@@ -154,6 +243,37 @@ export class R2Client {
       return ticks;
     } catch (error) {
       logger.error({ error, key }, 'Failed to download tick file from R2');
+      throw error;
+    }
+  }
+
+  /**
+   * Download and parse a single 5-minute candle file from R2
+   *
+   * @param key R2 object key
+   * @returns Array of candles from the file
+   */
+  async downloadCandleFile(key: string): Promise<Candle[]> {
+    const command = new GetObjectCommand({
+      Bucket: this.bucketName,
+      Key: key
+    });
+
+    try {
+      const response = await this.s3.send(command);
+
+      if (!response.Body) {
+        throw new Error(`No body in response for key: ${key}`);
+      }
+
+      // Convert stream to string
+      const bodyString = await response.Body.transformToString();
+      const candles: Candle[] = JSON.parse(bodyString);
+
+      logger.debug({ key, candleCount: candles.length }, 'Downloaded candle file');
+      return candles;
+    } catch (error) {
+      logger.error({ error, key }, 'Failed to download candle file from R2');
       throw error;
     }
   }
@@ -194,6 +314,40 @@ export class R2Client {
   }
 
   /**
+   * Download and merge all 5-minute candle files for a given symbol and date
+   * Automatically sorts candles by time
+   *
+   * @param symbol Trading symbol (e.g., "EURUSD")
+   * @param date Date to download candles for
+   * @returns Sorted array of all candles for the date
+   */
+  async downloadAllCandles(symbol: string, date: Date): Promise<Candle[]> {
+    const keys = await this.listCandleFiles(symbol, date);
+
+    if (keys.length === 0) {
+      logger.debug({ symbol, date }, 'No candle files found');
+      return [];
+    }
+
+    logger.debug({ symbol, date, fileCount: keys.length }, 'Downloading candle files');
+
+    const allCandles: Candle[] = [];
+
+    for (const key of keys) {
+      const candles = await this.downloadCandleFile(key);
+      for (const candle of candles) {
+        allCandles.push(candle);
+      }
+    }
+
+    // Sort by time
+    allCandles.sort((a, b) => a.time.getTime() - b.time.getTime());
+
+    logger.info({ symbol, date, candleCount: allCandles.length }, 'Downloaded and merged all candles');
+    return allCandles;
+  }
+
+  /**
    * Check if tick data exists in R2 for a given date range
    *
    * @param symbol Trading symbol (e.g., "EURUSD")
@@ -206,6 +360,32 @@ export class R2Client {
 
     while (currentDate <= endDate) {
       const files = await this.listTickFiles(symbol, currentDate);
+
+      if (files.length > 0) {
+        return true; // Found at least one file
+      }
+
+      // Move to next day
+      currentDate = new Date(currentDate);
+      currentDate.setDate(currentDate.getDate() + 1);
+    }
+
+    return false; // No files found in entire range
+  }
+
+  /**
+   * Check if 5-minute candle data exists in R2 for a given date range
+   *
+   * @param symbol Trading symbol (e.g., "EURUSD")
+   * @param startDate Start date (inclusive)
+   * @param endDate End date (inclusive)
+   * @returns True if at least one candle file exists for any date in the range
+   */
+  async hasCandlesForDateRange(symbol: string, startDate: Date, endDate: Date): Promise<boolean> {
+    let currentDate = new Date(startDate);
+
+    while (currentDate <= endDate) {
+      const files = await this.listCandleFiles(symbol, currentDate);
 
       if (files.length > 0) {
         return true; // Found at least one file

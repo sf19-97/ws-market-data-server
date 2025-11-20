@@ -1,5 +1,5 @@
 import { Pool } from 'pg';
-import { R2Client, Tick } from './r2Client.js';
+import { R2Client } from './r2Client.js';
 import { createLogger } from '../utils/logger.js';
 
 const logger = createLogger();
@@ -23,88 +23,21 @@ export interface CandleCoverage {
 }
 
 /**
- * MaterializationService - Converts R2 tick data into PostgreSQL 5-minute candles
+ * MaterializationService - Materializes pre-built 5m candles from R2 to PostgreSQL
  *
  * Architecture:
- * - R2 stores raw ticks (cheap storage)
- * - PostgreSQL stores 5m candles (base aggregation layer)
+ * - R2 stores pre-built 5m candles (cheap storage, built during import)
+ * - PostgreSQL stores 5m candles (for fast queries)
  * - Higher timeframes (15m, 1h, 4h, 12h) computed from 5m candles via materialized views
+ *
+ * Note: Candles are built once during import (see import-to-r2.ts), not here.
+ * This service just downloads and inserts pre-computed candles.
  */
 export class MaterializationService {
   constructor(
     private pool: Pool,
     private r2Client: R2Client
   ) {}
-
-  /**
-   * Build 5-minute candles from tick data
-   * Uses midpoint price (bid + ask) / 2
-   */
-  private buildFiveMinuteCandles(symbol: string, ticks: Tick[]): Candle[] {
-    if (ticks.length === 0) return [];
-
-    const candles: Candle[] = [];
-    const bucketSizeSeconds = 5 * 60; // 5 minutes in seconds
-
-    let currentBucketStart: number | null = null;
-    let currentCandle: Partial<Candle> | null = null;
-    let tickCount = 0;
-
-    for (const tick of ticks) {
-      // Calculate bucket start time (floor to nearest 5 minutes)
-      const bucketStart = Math.floor(tick.timestamp / bucketSizeSeconds) * bucketSizeSeconds;
-
-      // New bucket? Save previous candle and start new one
-      if (bucketStart !== currentBucketStart) {
-        if (currentCandle && currentBucketStart !== null) {
-          candles.push({
-            time: new Date(currentBucketStart * 1000), // Convert to milliseconds for Date
-            symbol,
-            open: currentCandle.open!,
-            high: currentCandle.high!,
-            low: currentCandle.low!,
-            close: currentCandle.close!,
-            volume: 0, // We don't have volume data from Dukascopy ticks
-            trades: tickCount
-          });
-        }
-
-        // Start new candle
-        const midPrice = (tick.bid + tick.ask) / 2;
-        currentBucketStart = bucketStart;
-        currentCandle = {
-          open: midPrice,
-          high: midPrice,
-          low: midPrice,
-          close: midPrice
-        };
-        tickCount = 1;
-      } else {
-        // Update current candle
-        const midPrice = (tick.bid + tick.ask) / 2;
-        currentCandle!.high = Math.max(currentCandle!.high!, midPrice);
-        currentCandle!.low = Math.min(currentCandle!.low!, midPrice);
-        currentCandle!.close = midPrice;
-        tickCount++;
-      }
-    }
-
-    // Save last candle
-    if (currentCandle && currentBucketStart !== null) {
-      candles.push({
-        time: new Date(currentBucketStart * 1000),
-        symbol,
-        open: currentCandle.open!,
-        high: currentCandle.high!,
-        low: currentCandle.low!,
-        close: currentCandle.close!,
-        volume: 0,
-        trades: tickCount
-      });
-    }
-
-    return candles;
-  }
 
   /**
    * Insert candles into candles_5m table with ON CONFLICT upsert
@@ -169,6 +102,9 @@ export class MaterializationService {
   /**
    * Materialize 5-minute candles for a single day
    *
+   * Downloads pre-built candles from R2 and inserts into PostgreSQL.
+   * Candles are built during import (see import-to-r2.ts), not here.
+   *
    * @param symbol Trading symbol (e.g., "EURUSD")
    * @param date Date to materialize
    */
@@ -176,19 +112,17 @@ export class MaterializationService {
     logger.debug({ symbol, date }, 'Materializing 5m candles for day');
 
     try {
-      // Step 1: Download all ticks from R2
-      const ticks = await this.r2Client.downloadAllTicks(symbol, date);
+      // Step 1: Download pre-built candles from R2
+      const candles = await this.r2Client.downloadAllCandles(symbol, date);
 
-      if (ticks.length === 0) {
-        logger.warn({ symbol, date }, 'No ticks found in R2');
+      if (candles.length === 0) {
+        logger.warn({ symbol, date }, 'No candles found in R2');
         return 0;
       }
 
-      // Step 2: Build 5-minute candles
-      const candles = this.buildFiveMinuteCandles(symbol, ticks);
-      logger.debug({ symbol, date, candleCount: candles.length }, 'Built candles from ticks');
+      logger.debug({ symbol, date, candleCount: candles.length }, 'Downloaded candles from R2');
 
-      // Step 3: Insert into PostgreSQL
+      // Step 2: Insert into PostgreSQL
       await this.insertCandles(candles);
 
       return candles.length;
@@ -337,15 +271,15 @@ export class MaterializationService {
   }
 
   /**
-   * Check if R2 has tick data for a date range
+   * Check if R2 has candle data for a date range
    *
    * @param symbol Trading symbol
    * @param startDate Start date (inclusive)
    * @param endDate End date (inclusive)
-   * @returns True if ticks exist in R2
+   * @returns True if candles exist in R2
    */
   async checkR2Coverage(symbol: string, startDate: Date, endDate: Date): Promise<boolean> {
-    return await this.r2Client.hasTicksForDateRange(symbol, startDate, endDate);
+    return await this.r2Client.hasCandlesForDateRange(symbol, startDate, endDate);
   }
 
   /**
