@@ -268,7 +268,13 @@ export class R2Client {
 
       // Convert stream to string
       const bodyString = await response.Body.transformToString();
-      const candles: Candle[] = JSON.parse(bodyString);
+      const rawCandles = JSON.parse(bodyString);
+
+      // Convert time strings back to Date objects
+      const candles: Candle[] = rawCandles.map((c: any) => ({
+        ...c,
+        time: new Date(c.time)
+      }));
 
       logger.debug({ key, candleCount: candles.length }, 'Downloaded candle file');
       return candles;
