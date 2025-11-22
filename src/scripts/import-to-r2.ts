@@ -112,7 +112,7 @@ class DukascopyToR2Importer {
     let processedChunks = 0;
     let totalTicks = 0;
 
-    while (currentDate < endDate) {
+    while (currentDate <= endDate) {
       const chunkEnd = new Date(currentDate);
       chunkEnd.setHours(chunkEnd.getHours() + chunkHours);
 
@@ -292,6 +292,12 @@ async function main() {
   const symbol = args[0].toUpperCase();
   const startDate = new Date(args[1]);
   const endDate = new Date(args[2]);
+
+  // If importing a single day, set end time to end of day
+  if (args[1] === args[2]) {
+    endDate.setHours(23, 59, 59, 999);
+  }
+
   const chunkHours = args[3] ? parseInt(args[3]) : 24;
 
   if (isNaN(startDate.getTime()) || isNaN(endDate.getTime())) {
