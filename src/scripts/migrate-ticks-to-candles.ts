@@ -1,7 +1,7 @@
 #!/usr/bin/env tsx
 import dotenv from 'dotenv';
 import { getR2Client, Tick, Candle } from '../services/r2Client.js';
-import { ListObjectsV2Command } from '@aws-sdk/client-s3';
+import { ListObjectsV2Command, ListObjectsV2CommandOutput } from '@aws-sdk/client-s3';
 import { createLogger } from '../utils/logger.js';
 
 dotenv.config();
@@ -219,13 +219,13 @@ class TickToCandleMigrator {
     let continuationToken: string | undefined = undefined;
 
     do {
-      const command = new ListObjectsV2Command({
+      const command: ListObjectsV2Command = new ListObjectsV2Command({
         Bucket: process.env.R2_BUCKET_NAME!,
         Prefix: prefix,
         ContinuationToken: continuationToken
       });
 
-      const response = await this.r2Client!.s3Client.send(command);
+      const response: ListObjectsV2CommandOutput = await this.r2Client!.s3Client.send(command);
 
       if (response.Contents) {
         for (const obj of response.Contents) {
