@@ -11,8 +11,9 @@ import { testConnection, getPool } from "./utils/database.js";
 import { MetadataService } from "./services/metadataService.js";
 import { CandlesService } from "./services/candlesService.js";
 import { TickBatcher } from "./services/tickBatcher.js";
-import { MaterializationService } from "./services/materializationService.js";
-import { getR2Client } from "./services/r2Client.js";
+// MaterializationService disabled - was causing 60s+ API timeouts
+// import { MaterializationService } from "./services/materializationService.js";
+// import { getR2Client } from "./services/r2Client.js";
 import { schemas, validateQuery, sanitizeSymbol, ApiError } from "./middleware/validation.js";
 import { errorHandler, notFoundHandler, asyncHandler } from "./middleware/errorHandler.js";
 import { apiLimiter, strictLimiter, healthLimiter } from "./middleware/rateLimiter.js";
@@ -55,19 +56,10 @@ class MarketDataServer {
     const pool = getPool();
     this.metadataService = new MetadataService(pool);
 
-    // Initialize R2 client and materialization service (optional, graceful degradation)
-    const r2Client = getR2Client();
-    let materializationService: MaterializationService | undefined;
-
-    if (r2Client) {
-      materializationService = new MaterializationService(pool, r2Client);
-      logger.info('MaterializationService initialized with R2 support');
-    } else {
-      logger.warn('R2 not configured - auto-materialization disabled');
-    }
-
-    // Initialize CandlesService with optional materialization support
-    this.candlesService = new CandlesService(pool, materializationService);
+    // Initialize CandlesService WITHOUT auto-materialization
+    // Auto-materialization was causing 60s+ timeouts by downloading R2 data for every weekend
+    // Data should already be in PostgreSQL - if missing, run materialization scripts manually
+    this.candlesService = new CandlesService(pool);
 
     this.tickBatcher = new TickBatcher({
       maxBatchSize: 1000,     // Upload after 1000 ticks
