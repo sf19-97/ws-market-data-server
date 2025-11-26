@@ -122,13 +122,22 @@ export class MetadataService {
    * ```
    */
   async getAllSymbols(): Promise<{ symbols: SymbolMetadata[]; timeframes: readonly Timeframe[] }> {
+    // Query both market_ticks (legacy) and candles_5m (R2 materialized) tables
     const result = await this.pool.query(`
       SELECT
         symbol,
-        MIN(time) as earliest,
-        MAX(time) as latest,
-        COUNT(*) as tick_count
-      FROM market_ticks
+        MIN(earliest) as earliest,
+        MAX(latest) as latest,
+        SUM(count) as tick_count
+      FROM (
+        SELECT symbol, MIN(time) as earliest, MAX(time) as latest, COUNT(*) as count
+        FROM market_ticks
+        GROUP BY symbol
+        UNION ALL
+        SELECT symbol, MIN(time) as earliest, MAX(time) as latest, COUNT(*) as count
+        FROM candles_5m
+        GROUP BY symbol
+      ) combined
       GROUP BY symbol
       ORDER BY symbol
     `);
