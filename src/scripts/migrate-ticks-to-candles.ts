@@ -107,67 +107,105 @@ class TickToCandleMigrator {
    * Parse tick file key to extract metadata
    * Example: ticks/EURUSD/2024/01/15/part-1234567890.json
    */
-  private parseTickKey(key: string): { symbol: string; date: Date; year: string; month: string; day: string } | null {
+  private parseTickKey(key: string): { symbol: string; year: string; month: string; day: string } | null {
     const parts = key.split('/');
     if (parts.length !== 6 || parts[0] !== 'ticks') {
       return null;
     }
 
     const [, symbol, year, month, day] = parts;
-    const date = new Date(`${year}-${month}-${day}`);
 
-    if (isNaN(date.getTime())) {
-      return null;
-    }
-
-    return { symbol, date, year, month, day };
+    return { symbol, year, month, day };
   }
 
   /**
-   * Migrate a single tick file to candles
+   * Group tick files by symbol/year/month
+   * Returns: Map<"SYMBOL/YYYY/MM", string[]>
    */
-  private async migrateTickFile(tickKey: string, dryRun: boolean): Promise<{ success: boolean; tickCount: number; candleCount: number }> {
-    const metadata = this.parseTickKey(tickKey);
+  private groupTickFilesByMonth(tickKeys: string[]): Map<string, string[]> {
+    const groups = new Map<string, string[]>();
 
-    if (!metadata) {
-      logger.warn({ tickKey }, 'Invalid tick key format, skipping');
-      return { success: false, tickCount: 0, candleCount: 0 };
+    for (const key of tickKeys) {
+      const metadata = this.parseTickKey(key);
+      if (!metadata) continue;
+
+      const { symbol, year, month } = metadata;
+      const monthKey = `${symbol}/${year}/${month}`;
+
+      if (!groups.has(monthKey)) {
+        groups.set(monthKey, []);
+      }
+      groups.get(monthKey)!.push(key);
     }
 
-    const { symbol, date } = metadata;
+    return groups;
+  }
+
+  /**
+   * Migrate all tick files for a given month into a single candle file
+   */
+  private async migrateMonth(
+    symbol: string,
+    year: string,
+    month: string,
+    tickKeys: string[],
+    dryRun: boolean
+  ): Promise<{ success: boolean; tickCount: number; candleCount: number }> {
+    const monthKey = `${symbol}/${year}/${month}`;
 
     try {
-      // Download ticks
-      const ticks = await this.r2Client!.downloadTickFile(tickKey);
+      // Download ALL tick files for this month
+      console.log(`   📥 Downloading ${tickKeys.length} tick files...`);
+      const allTicks: Tick[] = [];
 
-      if (ticks.length === 0) {
-        logger.warn({ tickKey }, 'No ticks found in file');
+      for (const tickKey of tickKeys) {
+        const ticks = await this.r2Client!.downloadTickFile(tickKey);
+        // Use concat instead of spread to avoid stack overflow with large arrays
+        for (const tick of ticks) {
+          allTicks.push(tick);
+        }
+      }
+
+      if (allTicks.length === 0) {
+        logger.warn({ monthKey }, 'No ticks found for month');
         return { success: true, tickCount: 0, candleCount: 0 };
       }
 
-      // Build candles
-      const candles = this.buildFiveMinuteCandles(symbol, ticks);
+      // Sort ticks by timestamp (important for candle building)
+      allTicks.sort((a, b) => a.timestamp - b.timestamp);
+
+      // Build candles from ALL ticks in the month
+      console.log(`   🕯️  Building candles from ${allTicks.length.toLocaleString()} ticks...`);
+      const candles = this.buildFiveMinuteCandles(symbol, allTicks);
 
       if (dryRun) {
         logger.info(
-          { tickKey, tickCount: ticks.length, candleCount: candles.length },
-          '[DRY RUN] Would migrate'
+          { monthKey, fileCount: tickKeys.length, tickCount: allTicks.length, candleCount: candles.length },
+          '[DRY RUN] Would migrate month'
         );
-        return { success: true, tickCount: ticks.length, candleCount: candles.length };
+        return { success: true, tickCount: allTicks.length, candleCount: candles.length };
       }
 
-      // Upload candles
+      // Upload as ONE monthly file
+      // Use explicit Date constructor to avoid timezone parsing issues
+      const date = new Date(parseInt(year), parseInt(month) - 1, 1);
       const candleKey = await this.r2Client!.uploadCandles(symbol, date, candles);
 
+      console.log(`   ✅ Uploaded to: ${candleKey}`);
       logger.info(
-        { tickKey, candleKey, tickCount: ticks.length, candleCount: candles.length },
-        'Migrated tick file to candles'
+        { monthKey, candleKey, fileCount: tickKeys.length, tickCount: allTicks.length, candleCount: candles.length },
+        'Migrated month to candles'
       );
 
-      return { success: true, tickCount: ticks.length, candleCount: candles.length };
+      return { success: true, tickCount: allTicks.length, candleCount: candles.length };
 
     } catch (error: any) {
-      logger.error({ error, tickKey }, 'Failed to migrate tick file');
+      console.error(`   ❌ Error: ${error.message || error}`);
+      if (error.stack) {
+        logger.error({ error: error.stack, monthKey }, 'Failed to migrate month');
+      } else {
+        logger.error({ error: String(error), monthKey }, 'Failed to migrate month');
+      }
       return { success: false, tickCount: 0, candleCount: 0 };
     }
   }
@@ -264,7 +302,12 @@ class TickToCandleMigrator {
       return;
     }
 
-    // Migrate each file
+    // Group tick files by month
+    console.log('📊 Grouping tick files by month...');
+    const monthGroups = this.groupTickFilesByMonth(tickKeys);
+    console.log(`   Found ${monthGroups.size} months to process\n`);
+
+    // Migrate each month
     let processedCount = 0;
     let successCount = 0;
     let failureCount = 0;
@@ -273,13 +316,14 @@ class TickToCandleMigrator {
 
     const startTime = Date.now();
 
-    for (const tickKey of tickKeys) {
+    for (const [monthKey, monthTickKeys] of monthGroups) {
       processedCount++;
-      const progress = `[${processedCount}/${tickKeys.length}]`;
+      const progress = `[${processedCount}/${monthGroups.size}]`;
 
-      console.log(`${progress} ${tickKey}`);
+      const [symbol, year, month] = monthKey.split('/');
+      console.log(`\n${progress} ${monthKey} (${monthTickKeys.length} files)`);
 
-      const result = await this.migrateTickFile(tickKey, dryRun);
+      const result = await this.migrateMonth(symbol, year, month, monthTickKeys, dryRun);
 
       if (result.success) {
         successCount++;
@@ -292,7 +336,7 @@ class TickToCandleMigrator {
       }
 
       // Small delay to avoid hammering R2
-      await new Promise(resolve => setTimeout(resolve, 100));
+      await new Promise(resolve => setTimeout(resolve, 500));
     }
 
     const elapsedMinutes = ((Date.now() - startTime) / 1000 / 60).toFixed(2);
@@ -304,9 +348,10 @@ class TickToCandleMigrator {
 
     // Summary
     console.log('\n📊 Migration Summary:');
-    console.log(`   Total files: ${processedCount}`);
+    console.log(`   Total months: ${processedCount}`);
     console.log(`   Successful: ${successCount}`);
     console.log(`   Failed: ${failureCount}`);
+    console.log(`   Total tick files: ${tickKeys.length}`);
     console.log(`   Total ticks processed: ${totalTicks.toLocaleString()}`);
     console.log(`   Total candles created: ${totalCandles.toLocaleString()}`);
     console.log(`   Time elapsed: ${elapsedMinutes} minutes`);

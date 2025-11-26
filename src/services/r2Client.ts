@@ -31,7 +31,7 @@ export interface Candle {
  *
  * Data structure:
  * - Ticks: ticks/{SYMBOL}/{YYYY}/{MM}/{DD}/part-{timestamp}.json
- * - Candles: candles/5m/{SYMBOL}/{YYYY}/{MM}/{DD}/part-{timestamp}.json
+ * - Candles: candles/{SYMBOL}/{YYYY}/{MM}/part-{timestamp}.json
  */
 export class R2Client {
   private s3: S3Client;
@@ -106,10 +106,9 @@ export class R2Client {
   async uploadCandles(symbol: string, date: Date, candles: Candle[]): Promise<string> {
     const year = date.getFullYear();
     const month = String(date.getMonth() + 1).padStart(2, '0');
-    const day = String(date.getDate()).padStart(2, '0');
     const timestamp = Date.now();
 
-    const key = `candles/5m/${symbol}/${year}/${month}/${day}/part-${timestamp}.json`;
+    const key = `candles/${symbol}/${year}/${month}/part-${timestamp}.json`;
 
     try {
       await this.s3.send(new PutObjectCommand({
@@ -173,19 +172,18 @@ export class R2Client {
   }
 
   /**
-   * List all 5-minute candle files for a given symbol and date from R2
+   * List all candle files for a given symbol and month from R2
    * Handles pagination (max 1000 objects per request)
    *
    * @param symbol Trading symbol (e.g., "EURUSD")
-   * @param date Date to list files for
+   * @param date Date to list files for (year/month extracted)
    * @returns Array of R2 object keys
    */
   async listCandleFiles(symbol: string, date: Date): Promise<string[]> {
     const year = date.getFullYear();
     const month = String(date.getMonth() + 1).padStart(2, '0');
-    const day = String(date.getDate()).padStart(2, '0');
 
-    const prefix = `candles/5m/${symbol}/${year}/${month}/${day}/`;
+    const prefix = `candles/${symbol}/${year}/${month}/`;
 
     logger.debug({ prefix }, 'Listing candle files from R2');
 
