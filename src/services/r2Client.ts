@@ -71,9 +71,10 @@ export class R2Client {
    * @returns Promise resolving to the R2 key
    */
   async uploadTicks(symbol: string, date: Date, ticks: Tick[]): Promise<string> {
-    const year = date.getFullYear();
-    const month = String(date.getMonth() + 1).padStart(2, '0');
-    const day = String(date.getDate()).padStart(2, '0');
+    // CRITICAL: Use UTC methods to avoid timezone issues!
+    const year = date.getUTCFullYear();
+    const month = String(date.getUTCMonth() + 1).padStart(2, '0');
+    const day = String(date.getUTCDate()).padStart(2, '0');
     const timestamp = Date.now();
 
     const key = `ticks/${symbol}/${year}/${month}/${day}/part-${timestamp}.json`;
@@ -104,8 +105,9 @@ export class R2Client {
    * @returns Promise resolving to the R2 key
    */
   async uploadCandles(symbol: string, date: Date, candles: Candle[]): Promise<string> {
-    const year = date.getFullYear();
-    const month = String(date.getMonth() + 1).padStart(2, '0');
+    // CRITICAL: Use UTC methods to avoid timezone issues!
+    const year = date.getUTCFullYear();
+    const month = String(date.getUTCMonth() + 1).padStart(2, '0');
     const timestamp = Date.now();
 
     const key = `candles/${symbol}/${year}/${month}/part-${timestamp}.json`;
@@ -136,9 +138,10 @@ export class R2Client {
    * @returns Array of R2 object keys
    */
   async listTickFiles(symbol: string, date: Date): Promise<string[]> {
-    const year = date.getFullYear();
-    const month = String(date.getMonth() + 1).padStart(2, '0');
-    const day = String(date.getDate()).padStart(2, '0');
+    // CRITICAL: Use UTC methods to avoid timezone issues!
+    const year = date.getUTCFullYear();
+    const month = String(date.getUTCMonth() + 1).padStart(2, '0');
+    const day = String(date.getUTCDate()).padStart(2, '0');
 
     const prefix = `ticks/${symbol}/${year}/${month}/${day}/`;
 
@@ -180,8 +183,9 @@ export class R2Client {
    * @returns Array of R2 object keys
    */
   async listCandleFiles(symbol: string, date: Date): Promise<string[]> {
-    const year = date.getFullYear();
-    const month = String(date.getMonth() + 1).padStart(2, '0');
+    // CRITICAL: Use UTC methods to avoid timezone issues!
+    const year = date.getUTCFullYear();
+    const month = String(date.getUTCMonth() + 1).padStart(2, '0');
 
     const prefix = `candles/${symbol}/${year}/${month}/`;
 

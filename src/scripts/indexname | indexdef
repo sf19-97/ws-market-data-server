@@ -1,7 +1,0 @@
-         indexname          |                                              indexdef                                              
------------------------------+----------------------------------------------------------------------------------------------------
- forex_ticks_time_brin       | CREATE INDEX forex_ticks_time_brin ON public.market_ticks USING brin ("time")
- forex_ticks_symbol_time_uq  | CREATE UNIQUE INDEX forex_ticks_symbol_time_uq ON public.market_ticks USING btree (symbol, "time")
- forex_ticks_time_idx        | CREATE INDEX forex_ticks_time_idx ON public.market_ticks USING btree ("time" DESC)
- forex_ticks_symbol_time_idx | CREATE INDEX forex_ticks_symbol_time_idx ON public.market_ticks USING btree (symbol, "time" DESC)
-(4 rows)

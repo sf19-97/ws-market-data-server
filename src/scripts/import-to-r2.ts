@@ -78,6 +78,11 @@ class DukascopyToR2Importer {
 
   /**
    * Import tick data for a date range from Dukascopy to R2
+   *
+   * IMPORTANT: All times are UTC! Forex markets:
+   * - Open: Sunday 22:00 UTC (Sydney open)
+   * - Close: Friday 22:00 UTC (New York close)
+   * - We skip: Saturday 00:00 UTC to Sunday 22:00 UTC
    */
   async import(
     symbol: string,
@@ -89,46 +94,63 @@ class DukascopyToR2Importer {
     // Validate symbol
     const validatedSymbol = this.validateSymbol(symbol);
 
-    // Normalize dates to start of day
+    // Normalize dates to start of day IN UTC
     const start = new Date(startDate);
-    start.setHours(0, 0, 0, 0);
+    start.setUTCHours(0, 0, 0, 0);
     const end = new Date(endDate);
-    end.setHours(23, 59, 59, 999);
+    end.setUTCHours(23, 59, 59, 999);
 
-    // Validate weekend single-day imports
-    if (start.toDateString() === end.toDateString()) {
-      const dayOfWeek = start.getDay();
-      if (dayOfWeek === 0 || dayOfWeek === 6) {
-        console.log(`⚠️  Cannot import single weekend day: ${start.toISOString().split('T')[0]}`);
-        console.log(`   Forex markets are closed on weekends.`);
+    // Validate weekend single-day imports (Saturday only - Sunday evening has trading)
+    if (start.toISOString().split('T')[0] === end.toISOString().split('T')[0]) {
+      const dayOfWeek = start.getUTCDay();
+      if (dayOfWeek === 6) { // Saturday only - Sunday has evening trading
+        console.log(`⚠️  Cannot import Saturday: ${start.toISOString().split('T')[0]}`);
+        console.log(`   Forex markets are closed on Saturdays.`);
         return;
       }
     }
 
     console.log(`\n📦 Importing ${validatedSymbol} from Dukascopy → R2`);
-    console.log(`   From: ${start.toISOString().split('T')[0]}`);
-    console.log(`   To: ${end.toISOString().split('T')[0]}`);
-    console.log(`   Chunk size: ${chunkHours} hour(s)\n`);
+    console.log(`   From: ${start.toISOString()}`);
+    console.log(`   To: ${end.toISOString()}`);
+    console.log(`   Chunk size: ${chunkHours} hour(s)`);
+    console.log(`   NOTE: All times are UTC\n`);
 
     let currentDate = new Date(start);
     let processedChunks = 0;
     let totalTicks = 0;
 
     while (currentDate <= end) {
-      // Skip weekends - advance to Monday 00:00
-      const dayOfWeek = currentDate.getDay();
-      if (dayOfWeek === 0 || dayOfWeek === 6) {
-        console.log(`⏭️  Skipping ${currentDate.toISOString().split('T')[0]} (weekend)`);
-        // Advance to next Monday at 00:00
-        const daysToMonday = dayOfWeek === 0 ? 1 : 2; // Sunday -> Monday (1 day), Saturday -> Monday (2 days)
-        currentDate.setDate(currentDate.getDate() + daysToMonday);
-        currentDate.setHours(0, 0, 0, 0);
+      const dayOfWeek = currentDate.getUTCDay();
+      const hour = currentDate.getUTCHours();
+
+      // Skip ONLY the closed period: Saturday 00:00 UTC to Sunday 22:00 UTC
+      // Forex opens Sunday 22:00 UTC (Sydney), closes Friday 22:00 UTC (New York)
+      const isSaturday = dayOfWeek === 6;
+      const isSundayBeforeOpen = dayOfWeek === 0 && hour < 22;
+
+      if (isSaturday || isSundayBeforeOpen) {
+        const skipLabel = currentDate.toISOString().slice(0, 16);
+        console.log(`⏭️  Skipping ${skipLabel} (market closed)`);
+
+        // Advance to Sunday 22:00 UTC (market open)
+        if (isSaturday) {
+          // Saturday -> Sunday 22:00 = +1 day + set to 22:00
+          currentDate.setUTCDate(currentDate.getUTCDate() + 1);
+          currentDate.setUTCHours(22, 0, 0, 0);
+        } else {
+          // Sunday before 22:00 -> Sunday 22:00
+          currentDate.setUTCHours(22, 0, 0, 0);
+        }
         continue;
       }
 
+      // Use clean day boundaries: current day 00:00:00 to 23:59:59.999
+      // This prevents overlap and ensures data is filed under the correct date
       const chunkEnd = new Date(currentDate);
-      chunkEnd.setHours(chunkEnd.getHours() + chunkHours);
+      chunkEnd.setUTCHours(23, 59, 59, 999);
 
+      // Don't exceed the overall end date
       if (chunkEnd > end) {
         chunkEnd.setTime(end.getTime());
       }
@@ -143,7 +165,14 @@ class DukascopyToR2Importer {
 
         if (ticks.length === 0) {
           console.log(`   ⚠️  No data found for this chunk`);
-          currentDate = new Date(chunkEnd);  // FIXED: Advance by chunk, not by day
+          // Break if we're at the end boundary to avoid infinite loop
+          if (chunkEnd.getTime() >= end.getTime()) {
+            console.log(`   ℹ️  Reached end of date range`);
+            break;
+          }
+          // Advance to next day's midnight
+          currentDate.setUTCDate(currentDate.getUTCDate() + 1);
+          currentDate.setUTCHours(0, 0, 0, 0);
           continue;
         }
 
@@ -182,7 +211,14 @@ class DukascopyToR2Importer {
 
             if (ticks.length === 0) {
               console.log(`   ⚠️  No data found for this chunk after retry`);
-              currentDate = new Date(chunkEnd);  // FIXED: Advance by chunk, not by day
+              // Break if we're at the end boundary to avoid infinite loop
+              if (chunkEnd.getTime() >= end.getTime()) {
+                console.log(`   ℹ️  Reached end of date range`);
+                break;
+              }
+              // Advance to next day's midnight
+              currentDate.setUTCDate(currentDate.getUTCDate() + 1);
+              currentDate.setUTCHours(0, 0, 0, 0);
               continue;
             }
 
@@ -199,7 +235,14 @@ class DukascopyToR2Importer {
           } catch (retryError: any) {
             console.error(`   ❌ Retry failed:`, retryError.message);
             console.log(`   ⏭️  Skipping chunk after retry failure`);
-            currentDate = new Date(chunkEnd);  // Ensure we advance even on retry failure
+            // Break if we're at the end boundary to avoid infinite loop
+            if (chunkEnd.getTime() >= end.getTime()) {
+              console.log(`   ℹ️  Reached end of date range`);
+              break;
+            }
+            // Advance to next day's midnight
+            currentDate.setUTCDate(currentDate.getUTCDate() + 1);
+            currentDate.setUTCHours(0, 0, 0, 0);
             continue;
           }
         } else if (error.message?.includes('BufferFetcher') || error.stack?.includes('BufferFetcher')) {
@@ -217,8 +260,9 @@ class DukascopyToR2Importer {
         }
       }
 
-      // Move to next chunk (advance by chunk end, not by day)
-      currentDate = new Date(chunkEnd);
+      // Advance to next day's midnight (00:00:00.000 UTC)
+      currentDate.setUTCDate(currentDate.getUTCDate() + 1);
+      currentDate.setUTCHours(0, 0, 0, 0);
 
       // Delay between chunks (skip on last iteration)
       if (currentDate <= end && delaySeconds > 0) {
@@ -256,8 +300,9 @@ async function main() {
   }
 
   const symbol = args[0].toUpperCase();
-  const startDate = new Date(args[1]);
-  const endDate = new Date(args[2]);
+  // Parse dates as UTC to ensure consistent behavior regardless of local timezone
+  const startDate = new Date(args[1] + 'T00:00:00Z');
+  const endDate = new Date(args[2] + 'T23:59:59Z');
   const chunkHours = args[3] ? parseInt(args[3]) : 24;
   const delaySeconds = args[4] ? parseInt(args[4]) : 10;
 
