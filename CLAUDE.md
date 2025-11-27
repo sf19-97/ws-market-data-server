@@ -709,6 +709,73 @@ Key lesson: When configuring retry logic, ALWAYS set finite retry limits. Infini
 - Check database connection
 - Verify TimescaleDB extension is enabled
 
+**API requests timing out after 60+ seconds (FIXED - 2025-11-26)**
+
+Symptom: Frontend shows "Request timeout after 60000ms" for candle requests. Fly.io logs show repeated "Starting 5m candle materialization" messages for weekend dates.
+
+Root cause: The `ensureCandles5mExist()` function in `candlesService.ts` was designed to auto-materialize missing candles from R2. However, it had a critical flaw:
+
+1. **Coverage check treated weekends as "missing data"** - Forex markets are closed on weekends, so no candle data exists for Saturdays/Sundays
+2. **Each "missing" day triggered an R2 download** - The monthly candle file (~5000 candles, ~500KB) was downloaded for EACH weekend
+3. **Sequential processing blocked the API response** - No parallelization, no timeout, no background processing
+4. **Redundant downloads** - The same monthly file was downloaded multiple times (once per weekend in that month)
+
+Example: A 10-month date range request would trigger ~80 weekend materialization attempts, each downloading from R2 and inserting into PostgreSQL.
+
+Debugging method:
+1. **Check fly.io logs** for repeated materialization messages:
+   ```bash
+   fly logs -a ws-market-data-server | grep "materialization"
+   ```
+   - Look for dates that are Saturdays/Sundays
+   - Look for "No candles found in R2" warnings
+
+2. **Test API response time** directly:
+   ```bash
+   time curl -s "https://ws-market-data-server.fly.dev/api/candles?symbol=EURUSD&timeframe=4h&from=1706745600&to=1730000000" | wc -c
+   ```
+   - Should complete in <5 seconds, not 60+
+
+Fix applied:
+```typescript
+// src/index.ts - BEFORE (broken):
+const r2Client = getR2Client();
+let materializationService: MaterializationService | undefined;
+if (r2Client) {
+  materializationService = new MaterializationService(pool, r2Client);
+}
+this.candlesService = new CandlesService(pool, materializationService);
+
+// AFTER (fixed):
+// Auto-materialization disabled - was causing 60s+ API timeouts
+this.candlesService = new CandlesService(pool);
+```
+
+Location: `src/index.ts:58-61`
+
+Impact: API response time improved from 60+ seconds to <1 second.
+
+**IMPORTANT - Data must be pre-materialized:** Since auto-materialization is disabled, you must manually materialize data before it's available via the API:
+```bash
+# Materialize candles for a symbol/date range
+npx tsx src/scripts/materialize-candles.ts EURUSD 2024-01-01 2024-12-31
+
+# Refresh materialized views for higher timeframes
+npm run refresh-mvs
+```
+
+Key lessons:
+1. **Never block API responses on external I/O** - R2 downloads should be background jobs, not inline operations
+2. **Understand your data domain** - Forex markets have weekends; the coverage check should have excluded them
+3. **Test with production-like date ranges** - A 1-day test wouldn't have caught this; a 10-month range did
+4. **Monitor API response times** - Add alerts for p95 latency >5 seconds
+
+Future improvement (TODO): If re-enabling auto-materialization, implement:
+- Weekend awareness in coverage check
+- Background/async materialization (don't block response)
+- Per-month caching (don't re-download same monthly file)
+- Timeout with partial data response
+
 ### Database Issues
 
 **Index creation fails:**
