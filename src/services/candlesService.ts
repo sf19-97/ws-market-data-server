@@ -1,6 +1,6 @@
 import { Pool } from 'pg';
 import { Candle, Timeframe } from '../types/index.js';
-import { TIMEFRAME_VIEW_MAP, TIMEFRAME_INTERVAL_MAP } from '../utils/constants.js';
+import { TIMEFRAME_VIEW_MAP } from '../utils/constants.js';
 import { ApiError, validateMaterializedViewName } from '../middleware/validation.js';
 import { MaterializationService } from './materializationService.js';
 import { createLogger } from '../utils/logger.js';
@@ -16,8 +16,8 @@ const logger = createLogger();
  * - For higher timeframes (15m, 1h, 4h, 12h), refreshes materialized views
  * - Then returns candles with sub-second query performance
  *
- * Intelligently uses pre-computed materialized views for 5m, 15m, 1h, 4h, and 12h timeframes
- * to provide sub-second query response times. For 1m timeframe, aggregates raw tick data on-demand.
+ * Uses pre-computed materialized views for 5m, 15m, 1h, 4h, and 12h timeframes
+ * to provide sub-second query response times.
  *
  * All prices are formatted to 5 decimal places for forex accuracy.
  *
@@ -43,11 +43,10 @@ export class CandlesService {
   /**
    * Retrieves historical OHLC candle data for a trading symbol.
    *
-   * Uses optimized materialized views for 5m+ timeframes (instant queries).
-   * For 1m timeframe, aggregates raw ticks using PostgreSQL time_bucket().
+   * Uses optimized materialized views for 5m, 15m, 1h, 4h, and 12h timeframes.
    *
    * @param symbol - Normalized symbol identifier (e.g., 'EURUSD')
-   * @param timeframe - Candle timeframe: '1m', '5m', '15m', '1h', '4h', or '12h'
+   * @param timeframe - Candle timeframe: '5m', '15m', '1h', '4h', or '12h'
    * @param from - Start timestamp (Unix epoch seconds)
    * @param to - End timestamp (Unix epoch seconds)
    * @returns Array of OHLC candles, ordered by time ascending
@@ -81,92 +80,43 @@ export class CandlesService {
 
     const viewName = TIMEFRAME_VIEW_MAP[timeframe];
 
-    let query: string;
-    let queryParams: (string | number)[];
-
-    if (viewName) {
-      // Use materialized view for supported timeframes
-      validateMaterializedViewName(viewName); // Security check
-
-      query = `
-        SELECT
-          EXTRACT(EPOCH FROM time)::bigint AS time,
-          open,
-          high,
-          low,
-          close
-        FROM ${viewName}
-        WHERE symbol = $1
-          AND time >= to_timestamp($2)
-          AND time <= to_timestamp($3)
-        ORDER BY time ASC;
-      `;
-      queryParams = [symbol, from, to];
-    } else {
-      // Compute candles on-demand for unsupported timeframes
-      const interval = TIMEFRAME_INTERVAL_MAP[timeframe];
-
-      if (!interval) {
-        throw new ApiError(400, `Unsupported timeframe: ${timeframe}`, 'INVALID_TIMEFRAME');
-      }
-
-      query = `
-        SELECT
-          EXTRACT(EPOCH FROM time_bucket($1, time))::bigint AS time,
-          (array_agg(mid_price ORDER BY time ASC))[1] AS open,
-          MAX(mid_price) AS high,
-          MIN(mid_price) AS low,
-          (array_agg(mid_price ORDER BY time DESC))[1] AS close
-        FROM market_ticks
-        WHERE symbol = $2
-          AND time >= to_timestamp($3)
-          AND time <= to_timestamp($4)
-        GROUP BY time_bucket($1, time)
-        ORDER BY time ASC;
-      `;
-      queryParams = [interval, symbol, from, to];
+    if (!viewName) {
+      throw new ApiError(400, `Unsupported timeframe: ${timeframe}`, 'INVALID_TIMEFRAME');
     }
 
-    const result = await this.pool.query(query, queryParams);
+    // Security check
+    validateMaterializedViewName(viewName);
 
-    return result.rows.map(row => ({
-      time: parseInt(row.time),
-      open: parseFloat(parseFloat(row.open).toFixed(5)),
-      high: parseFloat(parseFloat(row.high).toFixed(5)),
-      low: parseFloat(parseFloat(row.low).toFixed(5)),
-      close: parseFloat(parseFloat(row.close).toFixed(5))
-    }));
-  }
-
-  /**
-   * Check if data exists for a date range
-   */
-  async hasDataInRange(symbol: string, from: number, to: number): Promise<boolean> {
-    const result = await this.pool.query(`
-      SELECT 1
-      FROM market_ticks
+    const query = `
+      SELECT
+        EXTRACT(EPOCH FROM time)::bigint AS time,
+        open,
+        high,
+        low,
+        close
+      FROM ${viewName}
       WHERE symbol = $1
         AND time >= to_timestamp($2)
         AND time <= to_timestamp($3)
-      LIMIT 1
-    `, [symbol, from, to]);
+      ORDER BY time ASC;
+    `;
 
-    return result.rows.length > 0;
-  }
+    const result = await this.pool.query(query, [symbol, from, to]);
 
-  /**
-   * Get count of ticks in a date range
-   */
-  async getTickCount(symbol: string, from: number, to: number): Promise<number> {
-    const result = await this.pool.query(`
-      SELECT COUNT(*) as count
-      FROM market_ticks
-      WHERE symbol = $1
-        AND time >= to_timestamp($2)
-        AND time <= to_timestamp($3)
-    `, [symbol, from, to]);
-
-    return parseInt(result.rows[0].count);
+    return result.rows
+      // Filter out any rows with null or NaN OHLC values
+      .filter(row =>
+        row.open !== null && row.high !== null && row.low !== null && row.close !== null &&
+        !isNaN(parseFloat(row.open)) && !isNaN(parseFloat(row.high)) &&
+        !isNaN(parseFloat(row.low)) && !isNaN(parseFloat(row.close))
+      )
+      .map(row => ({
+        time: parseInt(row.time),
+        open: parseFloat(parseFloat(row.open).toFixed(5)),
+        high: parseFloat(parseFloat(row.high).toFixed(5)),
+        low: parseFloat(parseFloat(row.low).toFixed(5)),
+        close: parseFloat(parseFloat(row.close).toFixed(5))
+      }));
   }
 
   /**
@@ -181,6 +131,10 @@ export class CandlesService {
     toTimestamp: number,
     timeframe: Timeframe
   ): Promise<void> {
+    if (!this.materializationService) {
+      return;
+    }
+
     const startDate = new Date(fromTimestamp * 1000);
     const endDate = new Date(toTimestamp * 1000);
 
@@ -190,7 +144,7 @@ export class CandlesService {
     );
 
     // Step 1: Check if 5m candles exist for this range
-    const coverage = await this.materializationService!.getCandleCoverage(
+    const coverage = await this.materializationService.getCandleCoverage(
       symbol,
       startDate,
       endDate
@@ -218,7 +172,7 @@ export class CandlesService {
         'Materializing date range'
       );
 
-      await this.materializationService!.materialize5mCandles(
+      await this.materializationService.materialize5mCandles(
         symbol,
         range.start,
         range.end
@@ -229,7 +183,7 @@ export class CandlesService {
     if (timeframe !== '5m' && TIMEFRAME_VIEW_MAP[timeframe]) {
       logger.info({ timeframe }, 'Refreshing materialized view for higher timeframe');
 
-      await this.materializationService!.refreshMaterializedViews([timeframe]);
+      await this.materializationService.refreshMaterializedViews([timeframe]);
     }
 
     logger.info({ symbol, timeframe }, 'Materialization complete');

@@ -6,7 +6,6 @@
  * Cache durations for different timeframes (in seconds)
  */
 export const CACHE_DURATIONS = {
-  '1m': 60,          // 1 minute
   '5m': 300,         // 5 minutes
   '15m': 600,        // 10 minutes
   '1h': 1800,        // 30 minutes
@@ -18,7 +17,7 @@ export const CACHE_DURATIONS = {
 /**
  * Supported timeframes for candle data
  */
-export const TIMEFRAMES = ['1m', '5m', '15m', '1h', '4h', '12h'] as const;
+export const TIMEFRAMES = ['5m', '15m', '1h', '4h', '12h'] as const;
 
 /**
  * Mapping of timeframes to materialized view names
@@ -31,36 +30,6 @@ export const TIMEFRAME_VIEW_MAP: Record<string, string> = {
   '4h': 'candles_4h',
   '12h': 'candles_12h'
 } as const;
-
-/**
- * Mapping of timeframes to PostgreSQL intervals for computed aggregations
- */
-export const TIMEFRAME_INTERVAL_MAP: Record<string, string> = {
-  '1m': '1 minute',
-  '5m': '5 minutes',
-  '15m': '15 minutes',
-  '1h': '1 hour',
-  '4h': '4 hours',
-  '12h': '12 hours'
-} as const;
-
-/**
- * Database index names
- */
-export const DATABASE_INDEXES = {
-  TIME_BRIN: 'forex_ticks_time_brin',
-  TIME_BTREE: 'forex_ticks_time_idx',
-  SYMBOL_TIME_UNIQUE: 'forex_ticks_symbol_time_uq',
-  SYMBOL_TIME_BTREE: 'forex_ticks_symbol_time_idx'
-} as const;
-
-/**
- * Indexes to drop during bulk import for performance
- */
-export const IMPORT_INDEXES_TO_DROP = [
-  DATABASE_INDEXES.TIME_BTREE,
-  DATABASE_INDEXES.SYMBOL_TIME_BTREE
-] as const;
 
 /**
  * WebSocket heartbeat interval (milliseconds)
@@ -84,7 +53,7 @@ export const IMPORT_BATCH_SIZE = 1000;
 /**
  * Maximum date range for API queries (in seconds)
  */
-export const MAX_API_DATE_RANGE = 365 * 24 * 60 * 60; // 1 year
+export const MAX_API_DATE_RANGE = 2 * 365 * 24 * 60 * 60; // 2 years
 
 /**
  * Default chunk size for historical data import (hours)

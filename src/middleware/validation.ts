@@ -1,5 +1,6 @@
 import { z } from 'zod';
 import { Request, Response, NextFunction } from 'express';
+import { MAX_API_DATE_RANGE } from '../utils/constants.js';
 
 /**
  * Custom API Error class for consistent error handling across the application.
@@ -46,7 +47,7 @@ export const schemas = {
   candles: z.object({
     symbol: z.string()
       .regex(/^[A-Z]{6}$/, 'Symbol must be 6 uppercase letters (e.g., EURUSD)'),
-    timeframe: z.enum(['1m', '5m', '15m', '1h', '4h', '12h'])
+    timeframe: z.enum(['5m', '15m', '1h', '4h', '12h'])
       .default('1h'),
     from: z.string()
       .regex(/^\d+$/, 'from must be a Unix timestamp in seconds')
@@ -57,10 +58,9 @@ export const schemas = {
   }).refine(data => data.from < data.to, {
     message: 'from timestamp must be before to timestamp'
   }).refine(data => {
-    const maxRange = 365 * 24 * 60 * 60; // 1 year in seconds
-    return (data.to - data.from) <= maxRange;
+    return (data.to - data.from) <= MAX_API_DATE_RANGE;
   }, {
-    message: 'Date range cannot exceed 1 year'
+    message: 'Date range cannot exceed 2 years'
   })
 };
 
@@ -153,7 +153,7 @@ export function sanitizeSymbol(symbol: string): string {
  * Validate timeframe is supported
  */
 export function isValidTimeframe(timeframe: string): boolean {
-  return ['1m', '5m', '15m', '1h', '4h', '12h'].includes(timeframe);
+  return ['5m', '15m', '1h', '4h', '12h'].includes(timeframe);
 }
 
 /**

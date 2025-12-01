@@ -41,6 +41,7 @@ export class MaterializationService {
 
   /**
    * Insert candles into candles_5m table with ON CONFLICT upsert
+   * Uses batching to avoid PostgreSQL parameter limits
    */
   private async insertCandles(candles: Candle[]): Promise<void> {
     if (candles.length === 0) {
@@ -50,46 +51,105 @@ export class MaterializationService {
 
     logger.debug({ candleCount: candles.length }, 'Inserting candles into PostgreSQL');
 
+    // Step 1: Validate candles have all required fields
+    const validCandles = candles.filter(c => {
+      const isValid = c.time instanceof Date &&
+        typeof c.symbol === 'string' && c.symbol.length > 0 &&
+        typeof c.open === 'number' && !isNaN(c.open) &&
+        typeof c.high === 'number' && !isNaN(c.high) &&
+        typeof c.low === 'number' && !isNaN(c.low) &&
+        typeof c.close === 'number' && !isNaN(c.close) &&
+        typeof c.volume === 'number' &&
+        typeof c.trades === 'number';
+
+      if (!isValid) {
+        logger.warn({ candle: c }, 'Invalid candle skipped');
+      }
+      return isValid;
+    });
+
+    if (validCandles.length === 0) {
+      logger.warn('No valid candles to insert after validation');
+      return;
+    }
+
+    if (validCandles.length !== candles.length) {
+      logger.warn(
+        { original: candles.length, valid: validCandles.length, dropped: candles.length - validCandles.length },
+        'Some candles were invalid and dropped'
+      );
+    }
+
+    // Step 2: Deduplicate by (symbol, time) - keep LAST candle (most recent)
+    const dedupeMap = new Map<string, Candle>();
+    for (const candle of validCandles) {
+      const key = `${candle.symbol}_${candle.time.getTime()}`;
+      dedupeMap.set(key, candle); // Overwrites earlier duplicates
+    }
+    const dedupedCandles = Array.from(dedupeMap.values());
+
+    if (dedupedCandles.length !== validCandles.length) {
+      logger.info(
+        { original: validCandles.length, deduped: dedupedCandles.length, duplicates: validCandles.length - dedupedCandles.length },
+        'Deduplicated candles'
+      );
+    }
+
     const client = await this.pool.connect();
+    const BATCH_SIZE = 500; // Max candles per batch (500 * 8 = 4000 params, well under 32767 limit)
 
     try {
-      // Build batch INSERT with ON CONFLICT
-      const values: any[] = [];
-      const placeholders: string[] = [];
+      let totalInserted = 0;
 
-      candles.forEach((candle, idx) => {
-        const baseIdx = idx * 8;
-        placeholders.push(
-          `($${baseIdx + 1}, $${baseIdx + 2}, $${baseIdx + 3}, $${baseIdx + 4}, $${baseIdx + 5}, $${baseIdx + 6}, $${baseIdx + 7}, $${baseIdx + 8})`
+      // Process in batches
+      for (let batchStart = 0; batchStart < dedupedCandles.length; batchStart += BATCH_SIZE) {
+        const batch = dedupedCandles.slice(batchStart, batchStart + BATCH_SIZE);
+
+        // Build values array - push each value individually to avoid any array issues
+        const values: (Date | string | number)[] = [];
+        const placeholders: string[] = [];
+
+        for (let i = 0; i < batch.length; i++) {
+          const candle = batch[i];
+          const baseIdx = i * 8;
+
+          placeholders.push(
+            `($${baseIdx + 1}, $${baseIdx + 2}, $${baseIdx + 3}, $${baseIdx + 4}, $${baseIdx + 5}, $${baseIdx + 6}, $${baseIdx + 7}, $${baseIdx + 8})`
+          );
+
+          // Push each value individually
+          values.push(candle.time);
+          values.push(candle.symbol);
+          values.push(candle.open);
+          values.push(candle.high);
+          values.push(candle.low);
+          values.push(candle.close);
+          values.push(candle.volume);
+          values.push(candle.trades);
+        }
+
+        const query = `
+          INSERT INTO candles_5m (time, symbol, open, high, low, close, volume, trades)
+          VALUES ${placeholders.join(', ')}
+          ON CONFLICT (symbol, time) DO UPDATE SET
+            open = EXCLUDED.open,
+            high = EXCLUDED.high,
+            low = EXCLUDED.low,
+            close = EXCLUDED.close,
+            volume = EXCLUDED.volume,
+            trades = EXCLUDED.trades
+        `;
+
+        logger.debug(
+          { batchStart, batchSize: batch.length, valuesCount: values.length, placeholdersCount: placeholders.length },
+          'Inserting batch'
         );
-        values.push(
-          candle.time,
-          candle.symbol,
-          candle.open,
-          candle.high,
-          candle.low,
-          candle.close,
-          candle.volume,
-          candle.trades
-        );
-      });
 
-      const query = `
-        INSERT INTO candles_5m (time, symbol, open, high, low, close, volume, trades)
-        VALUES ${placeholders.join(', ')}
-        ON CONFLICT (symbol, time) DO UPDATE SET
-          open = EXCLUDED.open,
-          high = EXCLUDED.high,
-          low = EXCLUDED.low,
-          close = EXCLUDED.close,
-          volume = EXCLUDED.volume,
-          trades = EXCLUDED.trades
-      `;
+        const result = await client.query(query, values);
+        totalInserted += result.rowCount || 0;
+      }
 
-      const result = await client.query(query, values);
-      const rowCount = result.rowCount || 0;
-
-      logger.info({ rowCount }, 'Inserted/updated candles');
+      logger.info({ totalInserted, totalCandles: dedupedCandles.length }, 'Inserted/updated candles');
 
     } catch (error) {
       logger.error({ error }, 'Failed to insert candles');
@@ -279,7 +339,7 @@ export class MaterializationService {
    * @returns True if candles exist in R2
    */
   async checkR2Coverage(symbol: string, startDate: Date, endDate: Date): Promise<boolean> {
-    return await this.r2Client.hasCandlesForDateRange(symbol, startDate, endDate);
+    return this.r2Client.hasCandlesForDateRange(symbol, startDate, endDate);
   }
 
   /**

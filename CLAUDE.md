@@ -66,53 +66,73 @@ The system serves dual purposes:
 ```
 ws-market-data-server/
 ├── src/
-│   ├── index.ts                    # Main server (Express + WebSocket + API endpoints)
-│   ├── brokers/                    # Real-time broker implementations
-│   │   ├── BaseBroker.ts           # Abstract base class
-│   │   ├── BinanceBroker.ts        # Binance WebSocket connection
-│   │   ├── OandaBroker.ts          # OANDA HTTP stream connection
-│   │   └── Mock*.ts                # Testing brokers
-│   ├── core/                       # Core server components
+│   ├── index.ts                    # Main server entry point
+│   ├── api/                        # REST API layer
+│   │   ├── controllers/            # Request handlers
+│   │   │   ├── HealthController.ts
+│   │   │   ├── MetadataController.ts
+│   │   │   └── CandlesController.ts
+│   │   └── routes/                 # Express routes
+│   │       ├── health.ts
+│   │       ├── metadata.ts
+│   │       └── candles.ts
+│   ├── cli/                        # CLI tools
+│   │   ├── index.ts                # Unified CLI entry
+│   │   └── commands/               # Individual commands
+│   │       ├── import.ts           # Dukascopy → R2 tick import
+│   │       ├── migrate.ts          # R2 ticks → R2 candles
+│   │       ├── materialize.ts      # R2 candles → PostgreSQL
+│   │       ├── backfill.ts         # Backfill missing Fridays
+│   │       └── analyze.ts          # R2 data analysis
+│   ├── middleware/                 # Express middleware
+│   │   ├── validation.ts           # Request validation
+│   │   ├── rateLimiter.ts          # Rate limiting
+│   │   └── errorHandler.ts         # Error handling
+│   ├── repositories/               # Data access layer
+│   │   ├── CandlesRepository.ts    # Candle DB operations
+│   │   └── MetadataRepository.ts   # Symbol metadata queries
+│   ├── services/                   # Business logic
+│   │   ├── database.ts             # PostgreSQL connection pool
+│   │   ├── configLoader.ts         # Config file loader
+│   │   ├── candlesService.ts       # Candle aggregation
+│   │   ├── metadataService.ts      # Metadata operations
+│   │   ├── materializationService.ts # R2 → PostgreSQL sync
+│   │   ├── r2Client.ts             # Cloudflare R2 client
+│   │   ├── tickBatcher.ts          # Real-time tick batching
+│   │   └── swagger.ts              # OpenAPI spec
+│   ├── streaming/                  # WebSocket layer
 │   │   ├── BrokerManager.ts        # Broker orchestration
-│   │   └── ClientConnection.ts     # WebSocket client handler
-│   ├── services/                   # Business logic services
-│   │   ├── r2Client.ts             # Cloudflare R2 client for data lake storage
-│   │   ├── candlesService.ts       # Candle aggregation and caching
-│   │   └── tickBatcher.ts          # Real-time tick batching for R2
-│   ├── scripts/                    # Data import and maintenance
-│   │   ├── import-cli.ts           # CLI for historical data import (TimescaleDB)
-│   │   ├── importHistoricalData.ts # Core importer class (TimescaleDB)
-│   │   ├── import-to-r2.ts         # R2 data lake importer (Dukascopy → R2)
-│   │   ├── backfill-r2.ts          # Migration tool (PostgreSQL → R2)
-│   │   ├── materialize-candles.ts  # R2 → PostgreSQL candle materialization
-│   │   ├── analyze-r2.ts           # R2 data analysis and statistics
-│   │   ├── drop-import-indexes.ts  # Index management for bulk loads
-│   │   ├── recreate-indexes.ts     # Rebuild indexes after import
-│   │   ├── post-import-cleanup.ts  # Database maintenance
-│   │   └── check-*.ts              # Data validation utilities
+│   │   ├── ClientConnection.ts     # WS client handler
+│   │   ├── BaseBroker.ts           # Abstract base class
+│   │   ├── BinanceBroker.ts        # Binance WebSocket
+│   │   ├── OandaBroker.ts          # OANDA HTTP stream
+│   │   ├── KrakenBroker.ts         # Kraken WebSocket
+│   │   └── Mock*.ts                # Testing brokers
 │   ├── types/                      # TypeScript definitions
-│   └── utils/                      # Utility functions
-├── .claude/
-│   └── problems/                   # Technical problem documentation
-│       └── index-performance.md    # Index optimization analysis
+│   └── utils/                      # Utilities
+│       ├── logger.ts               # Pino logger
+│       └── constants.ts            # Shared constants
 ├── config/
 │   └── config.yaml                 # Broker configuration
-├── migrations/                     # Database schema migrations
-│   └── candles_5m.sql              # Candle tables for R2 materialization
-├── API_USAGE.md                    # REST API client guide
-├── IMPORT_GUIDE.md                 # Historical data import guide (TimescaleDB)
-├── INDEX_MANAGEMENT.md             # Database performance optimization
-├── R2_IMPORT_PROCESS.md            # R2 data lake import guide (RECOMMENDED)
-├── R2_DEPLOYMENT_GUIDE.md          # R2 deployment and production setup
-└── ARCHITECTURE.md                 # Detailed architecture docs
+├── docs/                           # Documentation
+│   ├── API_USAGE.md
+│   ├── ARCHITECTURE.md
+│   ├── IMPORT_GUIDE.md
+│   ├── R2_IMPORT_PROCESS.md
+│   └── ...
+├── tests/                          # Integration tests
+└── .claude/                        # Claude context
 ```
 
 ### Key Directories
 
-- **`/src/brokers/`** - Broker implementations for real-time data (Binance, OANDA)
+- **`/src/api/`** - REST API controllers and routes
+- **`/src/cli/`** - CLI tools for data import and maintenance
+- **`/src/middleware/`** - Express middleware (validation, rate limiting, errors)
+- **`/src/repositories/`** - Data access layer (database queries)
 - **`/src/services/`** - Business logic (R2 client, candle aggregation, tick batching)
-- **`/src/scripts/`** - Data import tools (R2 data lake + legacy TimescaleDB)
-- **`/src/core/`** - WebSocket server and connection management
+- **`/src/streaming/`** - WebSocket broker implementations (Binance, OANDA, Kraken)
+- **`/docs/`** - Documentation files
 - **`.claude/problems/`** - Technical analysis and performance investigations
 
 ### Storage Architecture: Dual System
@@ -211,9 +231,6 @@ npm start
 - `npm test` - Run test suite
 
 #### Data Import
-- `npm run import` - Import historical tick data
-- `npm run drop-indexes` - Drop indexes before bulk import
-- `npm run recreate-indexes` - Rebuild indexes after import
 - `npm run refresh-mvs` - Refresh materialized views
 
 ## API Documentation
@@ -239,7 +256,7 @@ GET /api/metadata?symbol=EURUSD
   "earliest": 1706745600,
   "latest": 1737755998,
   "tick_count": 11600518,
-  "timeframes": ["1m", "5m", "15m", "1h", "4h", "12h"]
+  "timeframes": ["5m", "15m", "1h", "4h", "12h"]
 }
 ```
 
@@ -253,7 +270,7 @@ GET /api/candles?symbol=EURUSD&timeframe=1h&from=1710918000&to=1711004399
 
 **Parameters:**
 - `symbol` (required): Symbol name (e.g., "EURUSD")
-- `timeframe` (optional): "1m", "5m", "15m", "1h", "4h", "12h" (default: "1h")
+- `timeframe` (optional): "5m", "15m", "1h", "4h", "12h" (default: "1h")
 - `from` (required): Start timestamp (Unix seconds)
 - `to` (required): End timestamp (Unix seconds)
 
@@ -302,22 +319,22 @@ ws.send(JSON.stringify({
 
 ```bash
 # Import one symbol for a date range
-npx tsx src/scripts/import-to-r2.ts EURUSD 2024-01-01 2024-12-31
+npx tsx src/cli/commands/import.ts EURUSD 2024-01-01 2024-12-31
 
 # Import with custom chunk size (default is 24 hours)
-npx tsx src/scripts/import-to-r2.ts EURUSD 2024-01-01 2024-12-31 24
+npx tsx src/cli/commands/import.ts EURUSD 2024-01-01 2024-12-31 24
 
 # Import multiple symbols in parallel (RECOMMENDED - see R2_IMPORT_PROCESS.md)
 ./parallel-import.sh major-pairs 2024-01-01 2024-12-31
 
 # Analyze R2 data
-npx tsx src/scripts/analyze-r2.ts --sample
+npx tsx src/cli/commands/analyze.ts --sample
 ```
 
 **After importing to R2:**
 ```bash
 # Materialize ticks to candles (if needed for PostgreSQL queries)
-npx tsx src/scripts/materialize-candles.ts EURUSD 2024-01-01 2024-12-31
+npx tsx src/cli/commands/materialize.ts EURUSD 2024-01-01 2024-12-31
 
 # Refresh materialized views (if using candles)
 npm run refresh-mvs
@@ -325,76 +342,37 @@ npm run refresh-mvs
 
 **See `R2_IMPORT_PROCESS.md` for complete guide with troubleshooting.**
 
-### TimescaleDB Import (LEGACY)
+### TimescaleDB Direct Import (DEPRECATED)
 
-**Import to PostgreSQL database** - Higher cost, but integrated with existing materialized views.
-
-```bash
-# Import last 7 days of EURUSD
-npm run import -- --symbol EURUSD --days 7
-
-# Import specific date range
-npm run import -- --symbol EURUSD --from 2024-03-01 --to 2024-03-31
-
-# Import with automatic index management (recommended for large imports)
-npm run import -- --symbol EURUSD --from 2024-01-01 --to 2024-12-31 --manage-indexes
-```
-
-**After importing to TimescaleDB:**
-```bash
-# Refresh materialized views to include new data
-npm run refresh-mvs
-
-# Verify import
-psql $DATABASE_URL -c "SELECT COUNT(*), MIN(time), MAX(time) FROM market_ticks WHERE symbol='EURUSD';"
-```
-
-### Performance Optimization
-
-For bulk imports, use the `--manage-indexes` flag for 5-10x faster performance:
-
-```bash
-npm run import -- \
-  --symbol EURUSD \
-  --from 2024-01-01 \
-  --to 2024-12-31 \
-  --manage-indexes
-```
-
-**What it does:**
-1. Drops expensive BTREE indexes
-2. Imports data (5-10x faster)
-3. Recreates indexes with `CONCURRENTLY`
-4. Runs `ANALYZE` to update statistics
-
-See [INDEX_MANAGEMENT.md](INDEX_MANAGEMENT.md) for detailed explanation.
+The legacy `npm run import` command and associated scripts have been removed. All new data should be imported via R2 data lake and materialized to `candles_5m`.
 
 ## Database Schema
 
 ### Core Tables
 
-#### `market_ticks` (TimescaleDB Hypertable)
+#### `candles_5m` (Primary Candle Storage)
 
-Primary table for raw tick data:
+Pre-computed 5-minute candles materialized from R2 data lake:
 
 ```sql
-CREATE TABLE market_ticks (
+CREATE TABLE candles_5m (
   time TIMESTAMPTZ NOT NULL,
   symbol TEXT NOT NULL,
-  ask DOUBLE PRECISION,
-  bid DOUBLE PRECISION,
-  CONSTRAINT forex_ticks_symbol_time_uq UNIQUE (symbol, time)
+  open DOUBLE PRECISION NOT NULL,
+  high DOUBLE PRECISION NOT NULL,
+  low DOUBLE PRECISION NOT NULL,
+  close DOUBLE PRECISION NOT NULL,
+  PRIMARY KEY (symbol, time)
 );
-
--- Convert to hypertable (time-series optimization)
-SELECT create_hypertable('market_ticks', 'time');
 ```
 
 **Indexes:**
-- `forex_ticks_symbol_time_uq` - UNIQUE constraint on (symbol, time)
-- `forex_ticks_time_brin` - BRIN index for time-range queries
-- `forex_ticks_time_idx` - BTREE on time DESC
-- `forex_ticks_symbol_time_idx` - BTREE on (symbol, time) DESC
+- Primary key on `(symbol, time)` for fast lookups
+- Used by `/api/metadata` and `/api/candles` endpoints
+
+#### `market_ticks` (LEGACY - Not Used by API)
+
+Raw tick data hypertable. Retained for historical reference but not queried by the API. The API now uses `candles_5m` as the source of truth.
 
 ### Materialized Views
 
@@ -417,7 +395,6 @@ npm run refresh-mvs
 
 1. **Materialized Views** - Pre-aggregated candles for instant queries
    - 5m, 15m, 1h, 4h, 12h timeframes use views
-   - 1m timeframe computed on-demand
 
 2. **TimescaleDB Hypertables** - Automatic partitioning by time
    - Efficient time-range queries
@@ -433,19 +410,19 @@ npm run refresh-mvs
 
 ### Import Optimization
 
-1. **Smart Index Management** - Drop/recreate indexes for bulk loads
-   - 5-10x faster imports
-   - Automated with `--manage-indexes` flag
+1. **R2 Data Lake** - Cost-effective tick storage
+   - 10x cheaper than database storage ($0.015/GB vs $0.15/GB)
+   - Parallel imports with `./parallel-import.sh`
 
 2. **Chunked Processing** - Import in configurable chunks
-   - Default 7-day chunks
+   - Default 24-hour chunks
    - Prevents memory issues
 
-3. **PostgreSQL COPY** - Fast bulk loading
-   - 100x faster than INSERT
-   - Used in import pipeline
+3. **On-demand Materialization** - Convert ticks to candles when needed
+   - Uses `materialize-candles.ts` script
+   - Stores pre-computed 5m candles in PostgreSQL
 
-## Recent Updates (Updated: 2025-11-19)
+## Recent Updates (Updated: 2025-11-30)
 
 ### R2 Data Lake Migration (Commit: 18be65e) - MAJOR ARCHITECTURE CHANGE
 
@@ -458,30 +435,34 @@ Dukascopy → R2 Data Lake → On-demand Materialization → PostgreSQL Candles
 
 **Core Components:**
 - `src/services/r2Client.ts` - S3-compatible client for Cloudflare R2
-- `src/scripts/import-to-r2.ts` - Direct Dukascopy → R2 import (skip database)
-- `src/scripts/materialize-candles.ts` - R2 → PostgreSQL candle aggregation
-- `src/scripts/backfill-r2.ts` - Migration tool (PostgreSQL → R2)
-- `src/scripts/analyze-r2.ts` - R2 data analysis and statistics
+- `src/cli/commands/import.ts` - Direct Dukascopy → R2 tick import
+- `src/cli/commands/migrate.ts` - Clean ticks → build 5m candles (with validation, dedup, quality gate)
+- `src/cli/commands/materialize.ts` - R2 candles → PostgreSQL (with batching, validation, dedup)
+- `src/cli/commands/backfill.ts` - Backfill DST-related Friday gaps
+- `src/cli/commands/analyze.ts` - R2 data analysis and statistics
 
 **Data Flow:**
-1. **Import**: Fetch tick data from Dukascopy → Upload to R2 as JSON
-2. **Store**: Ticks stored in R2 with partitioned structure: `ticks/{SYMBOL}/{YYYY}/{MM}/{DD}/part-{timestamp}.json`
-3. **Materialize**: When candles needed, read from R2 → aggregate → store in PostgreSQL candles_5m
-4. **Query**: Read candles from PostgreSQL (fast) while ticks stay in R2 (cheap)
+1. **Import**: Fetch tick data from Dukascopy → Upload to R2 as JSON (`import-to-r2.ts`)
+2. **Store**: Ticks stored in R2: `ticks/{SYMBOL}/{YYYY}/{MM}/{DD}/part-{timestamp}.json`
+3. **Clean & Build**: Read ticks → validate → deduplicate → quality gate → build 5m candles (`migrate-ticks-to-candles.ts`)
+4. **Candle Store**: Clean candles stored in R2: `candles/{SYMBOL}/{YYYY}/{MM}/part-{timestamp}.json`
+5. **Materialize**: Download R2 candles → deduplicate → batch insert to PostgreSQL (`materialize-candles.ts`)
+6. **Query**: Read candles from PostgreSQL (fast) while ticks stay in R2 (cheap)
 
-**Import Statistics (as of 2025-11-19):**
+**Import Statistics (as of 2025-11-30):**
 - **Total ticks in R2**: 157.8M+ ticks
-- **EURUSD**: 15.8M ticks (Feb 2024 - Jan 2025)
+- **EURUSD 2024**: 20M ticks → 72,375 candles (all 12 months)
 - **Other major pairs**: 1-2.7M ticks each (Oct-Nov 2024)
 - **Storage cost**: ~$0.015/month per GB vs $0.15/month in PostgreSQL
+- **Data quality**: 230K+ duplicates caught, 200+ invalid spreads removed
 
 **Critical Fixes:**
-1. **Infinite retry loop** (src/scripts/import-to-r2.ts:80, 141)
+1. **Infinite retry loop** (src/cli/commands/import.ts:80, 141)
    - Changed `failAfterRetryCount: false` → `true`
    - Prevented 18+ hour hangs when Dukascopy unavailable
    - Saved 72+ hours of wasted compute time
 
-2. **BufferFetcher error handling** (src/scripts/import-to-r2.ts:169)
+2. **BufferFetcher error handling** (src/cli/commands/import.ts:169)
    - Check both `error.message` AND `error.stack`
    - Gracefully skip dates with no data
    - Allows full-year imports to complete
@@ -490,6 +471,53 @@ Dukascopy → R2 Data Lake → On-demand Materialization → PostgreSQL Candles
 - `R2_IMPORT_PROCESS.md` - Complete R2 import guide with troubleshooting
 - `R2_DEPLOYMENT_GUIDE.md` - Production deployment guide
 - See troubleshooting section below for detailed error analysis
+
+### Data Cleaning Pipeline (Commit: 2025-11-30)
+
+**Added comprehensive tick cleaning to `migrate-ticks-to-candles.ts`:**
+
+The `cleanTicks()` method provides three-stage data quality:
+
+1. **Validation** - Filters out invalid ticks:
+   - `Number.isFinite()` check on timestamp, bid, ask
+   - Positive price validation
+   - Spread validation (bid < ask)
+
+2. **Deduplication** - Removes duplicate timestamps:
+   - Uses Map keyed by timestamp (O(n) complexity)
+   - Keeps LAST tick for each timestamp
+
+3. **Quality Gate** - Fails if data quality is poor:
+   - Throws error if > 5% bad ticks (configurable threshold)
+   - Logs detailed stats on what was dropped
+
+**Added 5-decimal rounding for forex prices:**
+```typescript
+const round5 = (n: number) => Math.round(n * 100000) / 100000;
+```
+
+**Results for EURUSD 2024:**
+- 20M ticks cleaned and processed
+- 69,928 candles built
+- Caught: 230,292 duplicates (March), 228 invalid spreads + 160,365 duplicates (October)
+
+### Materialization Service Fixes (Commit: 2025-11-30)
+
+**Fixed `materializationService.ts` with three improvements:**
+
+1. **Batching** - Process in chunks of 500 candles to avoid PostgreSQL parameter limits (500 × 8 = 4000 params, well under 32767 limit)
+
+2. **Validation** - Filter out invalid candles before inserting:
+   - Check all required fields exist (time, symbol, open, high, low, close, volume, trades)
+   - Verify types and non-NaN values
+
+3. **Deduplication** - Remove duplicate (symbol, time) combinations within batch:
+   - Prevents "ON CONFLICT DO UPDATE cannot affect row a second time" error
+   - Keeps LAST candle for each timestamp
+
+**Fixed `materialize-candles.ts` CLI:**
+- Now accepts separate start/end date arguments: `EURUSD 2024-01-01 2024-12-31`
+- Added UTC timezone handling with `T00:00:00Z` suffix
 
 ### Historical Data Import System (TimescaleDB - LEGACY)
 
@@ -523,16 +551,38 @@ Dukascopy → R2 Data Lake → On-demand Materialization → PostgreSQL Candles
 ### Scripts Added
 
 ```bash
-# R2 Data Lake (RECOMMENDED)
-npx tsx src/scripts/import-to-r2.ts EURUSD 2024-01-01 2024-12-31
-npx tsx src/scripts/materialize-candles.ts EURUSD 2024-01-01 2024-12-31
-npx tsx src/scripts/analyze-r2.ts --sample
+# R2 Data Lake Import (Dukascopy → R2 ticks)
+npx tsx src/cli/commands/import.ts EURUSD 2024-01-01 2024-12-31
 
-# TimescaleDB (LEGACY)
-npm run import              # Import historical tick data
-npm run drop-indexes        # Drop indexes before bulk import
-npm run recreate-indexes    # Recreate indexes after import
-npm run refresh-mvs         # Refresh materialized views
+# Build Candles from Ticks (R2 ticks → R2 candles, with cleaning)
+npx tsx src/cli/commands/migrate.ts EURUSD 2024-01-01 2024-12-31
+
+# Materialize to PostgreSQL (R2 candles → PostgreSQL candles_5m)
+npx tsx src/cli/commands/materialize.ts EURUSD 2024-01-01 2024-12-31
+
+# Backfill missing Fridays (DST-related gaps)
+npx tsx src/cli/commands/backfill.ts
+
+# Analyze R2 data
+npx tsx src/cli/commands/analyze.ts --sample
+
+# Materialized Views (higher timeframes)
+npm run refresh-mvs
+```
+
+**Complete Import Pipeline:**
+```bash
+# 1. Import ticks from Dukascopy to R2
+npx tsx src/cli/commands/import.ts EURUSD 2024-01-01 2024-12-31
+
+# 2. Build clean candles from ticks (validates, dedupes, quality gate)
+npx tsx src/cli/commands/migrate.ts EURUSD 2024-01-01 2024-12-31
+
+# 3. Materialize to PostgreSQL for API access
+npx tsx src/cli/commands/materialize.ts EURUSD 2024-01-01 2024-12-31
+
+# 4. Refresh higher timeframe views
+npm run refresh-mvs
 ```
 
 ### Database Improvements
@@ -568,10 +618,9 @@ npm run refresh-mvs         # Refresh materialized views
 4. **Monitor for hangs** - Check process state with `ps -p <PID> -o pid,stat,wchan,etime`
 5. **See R2_IMPORT_PROCESS.md** - Complete guide with all known issues and fixes
 
-**TimescaleDB (LEGACY):**
-1. **Use `--manage-indexes` for large imports** - 5-10x performance improvement
-2. **Refresh materialized views after imports** - `npm run refresh-mvs`
-3. **Import in chunks** - Default 7-day chunks for optimal memory usage
+**PostgreSQL Candles:**
+1. **Refresh materialized views after imports** - `npm run refresh-mvs`
+2. **Data is sourced from candles_5m table** - Not market_ticks
 
 **General:**
 1. **Always check metadata first** - Don't assume data exists up to current date
@@ -638,7 +687,7 @@ Debugging method (CRITICAL - use this for similar errors):
 
 2. **Run a test import** for a single problematic day:
    ```bash
-   UV_THREADPOOL_SIZE=128 npx tsx src/scripts/import-to-r2.ts EURUSD 2024-01-06 2024-01-07 2>&1 | tee test.log
+   UV_THREADPOOL_SIZE=128 npx tsx src/cli/commands/import.ts EURUSD 2024-01-06 2024-01-07 2>&1 | tee test.log
    ```
 
 3. **Examine the stack trace** in the log file. Look for the actual source of the error (BufferFetcher in this case).
@@ -652,7 +701,7 @@ Debugging method (CRITICAL - use this for similar errors):
    } else if (error.message?.includes('BufferFetcher') || error.stack?.includes('BufferFetcher')) {
    ```
 
-Location: `src/scripts/import-to-r2.ts:169`
+Location: `src/cli/commands/import.ts:169`
 
 Impact: Imports now gracefully skip problematic dates instead of crashing, allowing full-year imports to complete successfully.
 
@@ -689,13 +738,49 @@ failAfterRetryCount: false  // Retries forever!
 failAfterRetryCount: true   // Fails after 10 retries (100 seconds)
 ```
 
-Location: `src/scripts/import-to-r2.ts:80` and `src/scripts/import-to-r2.ts:141`
+Location: `src/cli/commands/import.ts:80` and `src/cli/commands/import.ts:141`
 
 Impact: Processes now fail fast after 10 retries (100 seconds), allowing error handling to catch and skip problematic chunks instead of hanging indefinitely.
 
 Time saved: 18+ hours per stuck process (4 processes = 72+ hours wasted before fix).
 
 Key lesson: When configuring retry logic, ALWAYS set finite retry limits. Infinite retries should only be used with external circuit breakers or timeouts.
+
+**PostgreSQL "ON CONFLICT cannot affect row a second time" error (FIXED)**
+
+Symptom: Materialization fails with `ON CONFLICT DO UPDATE command cannot affect row a second time`.
+
+Root cause: Duplicate candles within the same INSERT batch. When R2 has multiple candle files for the same month (from different migration runs), downloading all of them produces duplicates.
+
+Fix applied in `materializationService.ts`:
+```typescript
+// Deduplicate by (symbol, time) before inserting
+const dedupeMap = new Map<string, Candle>();
+for (const candle of validCandles) {
+  const key = `${candle.symbol}_${candle.time.getTime()}`;
+  dedupeMap.set(key, candle); // Keeps LAST candle
+}
+const dedupedCandles = Array.from(dedupeMap.values());
+```
+
+Location: `src/services/materializationService.ts:83-96`
+
+**PostgreSQL "bind message has N parameter formats but 0 parameters" error (FIXED)**
+
+Symptom: Materialization fails with parameter binding error, usually with large candle counts.
+
+Root cause: Attempting to insert too many candles in a single query (PostgreSQL has a 32767 parameter limit).
+
+Fix applied: Batch inserts in chunks of 500 candles:
+```typescript
+const BATCH_SIZE = 500; // 500 * 8 = 4000 params, well under 32767 limit
+for (let batchStart = 0; batchStart < dedupedCandles.length; batchStart += BATCH_SIZE) {
+  const batch = dedupedCandles.slice(batchStart, batchStart + BATCH_SIZE);
+  // ... insert batch
+}
+```
+
+Location: `src/services/materializationService.ts:98-150`
 
 ### API Issues
 
@@ -758,7 +843,7 @@ Impact: API response time improved from 60+ seconds to <1 second.
 **IMPORTANT - Data must be pre-materialized:** Since auto-materialization is disabled, you must manually materialize data before it's available via the API:
 ```bash
 # Materialize candles for a symbol/date range
-npx tsx src/scripts/materialize-candles.ts EURUSD 2024-01-01 2024-12-31
+npx tsx src/cli/commands/materialize.ts EURUSD 2024-01-01 2024-12-31
 
 # Refresh materialized views for higher timeframes
 npm run refresh-mvs
@@ -800,8 +885,7 @@ fly deploy
 # SSH into production
 fly ssh console
 
-# Import data on production
-npm run import -- --symbol EURUSD --from 2024-01-01 --to 2024-12-31 --manage-indexes
+# Refresh materialized views on production
 npm run refresh-mvs
 ```
 

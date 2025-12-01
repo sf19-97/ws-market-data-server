@@ -47,7 +47,9 @@ export class TickBatcher {
   private startFlushTimer(): void {
     // Check every minute for batches that need flushing
     this.flushTimer = setInterval(() => {
-      this.flushAgedBatches();
+      this.flushAgedBatches().catch((err) => {
+        logger.error({ err }, 'Failed to flush aged batches');
+      });
     }, 60 * 1000);
   }
 
@@ -57,6 +59,26 @@ export class TickBatcher {
   async addTick(symbol: string, timestamp: number, bid: number, ask: number): Promise<void> {
     if (!this.r2Client) {
       return; // R2 not configured, skip batching
+    }
+
+    // PATCH 3: Validate tick data before batching
+    if (!Number.isFinite(timestamp) || !Number.isFinite(bid) || !Number.isFinite(ask)) {
+      logger.warn({ symbol, timestamp, bid, ask }, 'Rejecting malformed tick in TickBatcher');
+      return;
+    }
+
+    // Sanity check: timestamp should be reasonable (2020-2030 range in Unix seconds)
+    const minTs = 1577836800; // 2020-01-01
+    const maxTs = 1893456000; // 2030-01-01
+    if (timestamp < minTs || timestamp > maxTs) {
+      logger.warn({ symbol, timestamp }, 'Rejecting tick with absurd timestamp in TickBatcher');
+      return;
+    }
+
+    // Sanity check: prices should be positive
+    if (bid <= 0 || ask <= 0) {
+      logger.warn({ symbol, bid, ask }, 'Rejecting tick with non-positive price in TickBatcher');
+      return;
     }
 
     const tick: Tick = { timestamp, bid, ask };

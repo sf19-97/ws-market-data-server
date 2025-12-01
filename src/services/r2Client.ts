@@ -26,6 +26,17 @@ export interface Candle {
   trades: number;
 }
 
+interface RawCandle {
+  time: string;
+  symbol: string;
+  open: number;
+  high: number;
+  low: number;
+  close: number;
+  volume: number;
+  trades: number;
+}
+
 /**
  * Cloudflare R2 Client for uploading tick and candle data to the data lake
  *
@@ -270,10 +281,10 @@ export class R2Client {
 
       // Convert stream to string
       const bodyString = await response.Body.transformToString();
-      const rawCandles = JSON.parse(bodyString);
+      const rawCandles: RawCandle[] = JSON.parse(bodyString);
 
       // Convert time strings back to Date objects
-      const candles: Candle[] = rawCandles.map((c: any) => ({
+      const candles: Candle[] = rawCandles.map((c) => ({
         ...c,
         time: new Date(c.time)
       }));
@@ -437,7 +448,7 @@ export function getR2Client(): R2Client | null {
   try {
     r2ClientInstance = new R2Client();
     return r2ClientInstance;
-  } catch (error) {
+  } catch {
     logger.warn('R2 client not available - continuing without R2 uploads');
     return null;
   }

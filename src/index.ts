@@ -2,26 +2,23 @@ import { WebSocketServer } from "ws";
 import { createServer } from "http";
 import express from "express";
 import cors from "cors";
-import crypto from "crypto";
-import { BrokerManager } from "./core/BrokerManager.js";
-import { ClientConnection } from "./core/ClientConnection.js";
-import { MarketData, ServerConfig, Timeframe } from "./types/index.js";
-import { loadConfig } from "./utils/config.js";
-import { testConnection, getPool } from "./utils/database.js";
+import { BrokerManager } from "./streaming/BrokerManager.js";
+import { ClientConnection } from "./streaming/ClientConnection.js";
+import { MarketData, ServerConfig } from "./types/index.js";
+import { loadConfig } from "./services/configLoader.js";
+import { testConnection, getPool } from "./services/database.js";
 import { MetadataService } from "./services/metadataService.js";
 import { CandlesService } from "./services/candlesService.js";
 import { TickBatcher } from "./services/tickBatcher.js";
-// MaterializationService disabled - was causing 60s+ API timeouts
-// import { MaterializationService } from "./services/materializationService.js";
-// import { getR2Client } from "./services/r2Client.js";
-import { schemas, validateQuery, sanitizeSymbol, ApiError } from "./middleware/validation.js";
-import { errorHandler, notFoundHandler, asyncHandler } from "./middleware/errorHandler.js";
-import { apiLimiter, strictLimiter, healthLimiter } from "./middleware/rateLimiter.js";
-import { CACHE_DURATIONS } from "./utils/constants.js";
+import { errorHandler, notFoundHandler } from "./middleware/errorHandler.js";
 import { createLogger } from "./utils/logger.js";
-import { swaggerSpec } from "./config/swagger.js";
+import { swaggerSpec } from "./services/swagger.js";
 import swaggerUi from "swagger-ui-express";
 import dotenv from "dotenv";
+
+// Import API layer
+import { HealthController, MetadataController, CandlesController } from "./api/controllers/index.js";
+import { createHealthRoutes, createMetadataRoutes, createCandlesRoutes } from "./api/routes/index.js";
 
 // Load environment variables from .env file
 dotenv.config();
@@ -41,13 +38,13 @@ class MarketDataServer {
 
   async start(): Promise<void> {
     // Load configuration
-    this.config = await loadConfig();
+    this.config = loadConfig();
 
     // Test database connection
     try {
       await testConnection();
       logger.info('Database connection successful');
-    } catch (error: any) {
+    } catch (error) {
       logger.error({ err: error }, 'Failed to connect to database');
       process.exit(1);
     }
@@ -97,7 +94,8 @@ class MarketDataServer {
       // Enable CORS with origin restrictions
       const allowedOrigins = process.env.ALLOWED_ORIGINS?.split(',') || [
         'http://localhost:3000',
-        'http://localhost:5173'  // Vite default port
+        'http://localhost:5173',  // Vite default port
+        'http://localhost:1420'   // Tauri default port
       ];
 
       this.app.use(cors({
@@ -146,214 +144,23 @@ class MarketDataServer {
       }));
       logger.debug('Registered /api-docs route (Swagger UI)');
 
-      // Health check endpoint with database connectivity check
-      this.app.get("/health", healthLimiter, asyncHandler(async (_, res) => {
-        try {
-          // Check database connectivity
-          const pool = getPool();
-          await pool.query('SELECT 1');
-
-          res.json({
-            status: "healthy",
-            database: "connected",
-            clients: this.clients.size,
-            uptime: process.uptime()
-          });
-        } catch (err) {
-          logger.error({ err }, 'Health check failed - database unavailable');
-          res.status(503).json({
-            status: "unhealthy",
-            database: "disconnected",
-            clients: this.clients.size,
-            uptime: process.uptime()
-          });
-        }
-      }));
-      logger.debug('Registered /health route');
-
-      // Metrics endpoint
-      this.app.get("/metrics", healthLimiter, (_, res) => {
-        res.json({
-          connections: this.clients.size,
-          subscriptions: Array.from(this.clients.values())
-            .reduce((acc, client) => acc + client.getSubscriptions().length, 0)
-        });
-      });
-      logger.debug('Registered /metrics route');
-
-      // Metadata API endpoint - discover available symbols and date ranges
-      this.app.get("/api/metadata",
-        apiLimiter,
-        validateQuery(schemas.metadata),
-        asyncHandler(async (req, res): Promise<void> => {
-          const { symbol } = req.query;
-
-          if (symbol) {
-            // Get metadata for a specific symbol
-            const normalizedSymbol = sanitizeSymbol(symbol as string);
-            const metadata = await this.metadataService.getSymbolMetadata(normalizedSymbol);
-
-            if (!metadata) {
-              throw new ApiError(404, "Symbol not found", "SYMBOL_NOT_FOUND");
-            }
-
-            res.json(metadata);
-          } else {
-            // Get list of all available symbols
-            const data = await this.metadataService.getAllSymbols();
-            res.json(data);
-          }
-        })
+      // Create controllers
+      const pool = getPool();
+      const healthController = new HealthController(
+        pool,
+        () => this.clients.size,
+        () => Array.from(this.clients.values())
+          .reduce((acc, client) => acc + client.getSubscriptions().length, 0)
       );
-      logger.debug('Registered /api/metadata route');
+      const metadataController = new MetadataController(this.metadataService);
+      const candlesController = new CandlesController(this.candlesService, this.metadataService);
 
-      // Metadata API endpoint - path parameter version for compatibility
-      this.app.get("/api/metadata/:symbol",
-        apiLimiter,
-        asyncHandler(async (req, res): Promise<void> => {
-          const { symbol } = req.params;
-          const normalizedSymbol = sanitizeSymbol(symbol);
-          const metadata = await this.metadataService.getSymbolMetadata(normalizedSymbol);
+      // Mount routes
+      this.app.use(createHealthRoutes(healthController));
+      this.app.use(createMetadataRoutes(metadataController));
+      this.app.use(createCandlesRoutes(candlesController));
 
-          if (!metadata) {
-            throw new ApiError(404, "Symbol not found", "SYMBOL_NOT_FOUND");
-          }
-
-          res.json(metadata);
-        })
-      );
-      logger.debug('Registered /api/metadata/:symbol route');
-
-      // Candles API endpoint
-      this.app.get("/api/candles",
-        strictLimiter,
-        validateQuery(schemas.candles),
-        asyncHandler(async (req, res): Promise<void> => {
-          const { symbol, timeframe, from, to } = req.query as unknown as {
-            symbol: string;
-            timeframe: Timeframe;
-            from: number;
-            to: number;
-          };
-
-          // Normalize symbol format (remove slashes)
-          const normalizedSymbol = sanitizeSymbol(symbol);
-
-          // Generate ETag for browser caching
-          const cacheKey = `${normalizedSymbol}-${timeframe}-${from}-${to}`;
-          const etag = crypto.createHash('md5').update(cacheKey).digest('hex');
-
-          // Check if client has valid cache
-          if (req.headers['if-none-match'] === etag) {
-            res.status(304).end(); // Not Modified
-            return;
-          }
-
-          // Fetch candles using service
-          const candles = await this.candlesService.getCandles(
-            normalizedSymbol,
-            timeframe,
-            from,
-            to
-          );
-
-          // Set cache headers
-          const cacheDuration = CACHE_DURATIONS[timeframe] || CACHE_DURATIONS.default;
-          res.set({
-            'Cache-Control': `public, max-age=${cacheDuration}`,
-            'ETag': etag,
-            'Vary': 'Accept-Encoding', // Important for CDNs
-            'Last-Modified': new Date().toUTCString()
-          });
-
-          res.json(candles);
-        })
-      );
-      logger.debug('Registered /api/candles route');
-
-      // Candles API endpoint - path parameter version for compatibility
-      this.app.get("/api/candles/:symbol/:timeframe",
-        strictLimiter,
-        asyncHandler(async (req, res): Promise<void> => {
-          const { symbol, timeframe } = req.params;
-          const { from, to } = req.query as { from?: string; to?: string };
-
-          // Validate required query parameters
-          if (!from || !to) {
-            throw new ApiError(
-              400,
-              "Missing required query parameters: 'from' and 'to' (Unix timestamps in seconds)",
-              'MISSING_PARAMETERS'
-            );
-          }
-
-          const normalizedSymbol = sanitizeSymbol(symbol);
-          const fromTimestamp = parseInt(from);
-          const toTimestamp = parseInt(to);
-
-          // Validate timeframe
-          if (!['1m', '5m', '15m', '1h', '4h', '12h'].includes(timeframe)) {
-            throw new ApiError(
-              400,
-              `Invalid timeframe '${timeframe}'. Must be one of: 1m, 5m, 15m, 1h, 4h, 12h`,
-              'INVALID_TIMEFRAME'
-            );
-          }
-
-          // Check if symbol exists
-          const symbolExists = await this.metadataService.symbolExists(normalizedSymbol);
-          if (!symbolExists) {
-            throw new ApiError(
-              404,
-              `Symbol '${normalizedSymbol}' not found in database`,
-              'SYMBOL_NOT_FOUND'
-            );
-          }
-
-          // Get available date range
-          const dateRange = await this.metadataService.getSymbolDateRange(normalizedSymbol);
-
-          // Generate ETag for caching
-          const cacheKey = `${normalizedSymbol}-${timeframe}-${fromTimestamp}-${toTimestamp}`;
-          const etag = crypto.createHash('md5').update(cacheKey).digest('hex');
-
-          // Check client cache
-          if (req.headers['if-none-match'] === etag) {
-            res.status(304).end();
-            return;
-          }
-
-          // Fetch candles
-          const candles = await this.candlesService.getCandles(
-            normalizedSymbol,
-            timeframe as Timeframe,
-            fromTimestamp,
-            toTimestamp
-          );
-
-          // Set cache headers
-          const cacheDuration = CACHE_DURATIONS[timeframe as Timeframe] || CACHE_DURATIONS.default;
-          res.set({
-            'Cache-Control': `public, max-age=${cacheDuration}`,
-            'ETag': etag,
-            'Vary': 'Accept-Encoding',
-            'Last-Modified': new Date().toUTCString()
-          });
-
-          // Add helpful headers when no data
-          if (candles.length === 0 && dateRange) {
-            res.set({
-              'X-Data-Available': 'false',
-              'X-Available-From': new Date(dateRange.earliest * 1000).toISOString(),
-              'X-Available-To': new Date(dateRange.latest * 1000).toISOString(),
-              'Warning': '199 - "No data available for requested date range. Check X-Available-From and X-Available-To headers."'
-            });
-          }
-
-          res.json(candles);
-        })
-      );
-      logger.debug('Registered /api/candles/:symbol/:timeframe route');
+      logger.debug('Registered API routes via controllers');
 
       // Error handling middleware (must be last)
       this.app.use(notFoundHandler);
@@ -414,26 +221,29 @@ class MarketDataServer {
       logger.info(`Client connected: ${clientId}`);
       
       // Handle client events
-      client.on("subscribe", async (data) => {
+      client.on("subscribe", (data) => {
         logger.info(`Client ${clientId} subscribing to:`, data);
         if (data.symbols && data.symbols.length > 0) {
-          await this.brokerManager.subscribe(data.broker, data.symbols, clientId);
+          this.brokerManager.subscribe(data.broker, data.symbols, clientId).catch((err) => {
+            logger.error({ err, clientId }, 'Subscribe failed');
+          });
         }
       });
 
-      client.on("unsubscribe", async (data) => {
+      client.on("unsubscribe", (data) => {
         logger.info(`Client ${clientId} unsubscribing from:`, data.symbols);
-        await this.brokerManager.unsubscribe(data.broker, data.symbols, clientId);
+        this.brokerManager.unsubscribe(data.broker, data.symbols, clientId).catch((err) => {
+          logger.error({ err, clientId }, 'Unsubscribe failed');
+        });
       });
-      
-      client.on("broker-auth", async (data) => {
+
+      client.on("broker-auth", (data) => {
         logger.info(`Client ${clientId} authenticating with ${data.broker}`);
-        try {
-          await this.brokerManager.addClientBroker(clientId, data.broker, data.credentials);
-        } catch (error: any) {
-          logger.error(`Failed to authenticate client ${clientId} with ${data.broker}:`, error.message);
-          client.sendError(`Authentication failed: ${error.message}`);
-        }
+        this.brokerManager.addClientBroker(clientId, data.broker, data.credentials).catch((err) => {
+          const message = err instanceof Error ? err.message : 'Unknown error';
+          logger.error({ err, clientId, broker: data.broker }, 'Authentication failed');
+          client.sendError(`Authentication failed: ${message}`);
+        });
       });
 
       client.on("disconnect", (id) => {
@@ -484,12 +294,10 @@ const server = new MarketDataServer();
 server.start().catch(console.error);
 
 // Handle graceful shutdown
-process.on("SIGINT", async () => {
-  await server.stop();
-  process.exit(0);
+process.on("SIGINT", () => {
+  server.stop().then(() => process.exit(0)).catch(() => process.exit(1));
 });
 
-process.on("SIGTERM", async () => {
-  await server.stop();
-  process.exit(0);
+process.on("SIGTERM", () => {
+  server.stop().then(() => process.exit(0)).catch(() => process.exit(1));
 });
