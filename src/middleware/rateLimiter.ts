@@ -1,10 +1,17 @@
 import rateLimit from 'express-rate-limit';
+import { RequestHandler } from 'express';
+
+// Disable rate limiting via environment variable
+const RATE_LIMIT_DISABLED = process.env.RATE_LIMIT_DISABLED === 'true';
+
+// No-op middleware when rate limiting is disabled
+const noopMiddleware: RequestHandler = (_req, _res, next) => next();
 
 /**
  * Rate limiter for general API endpoints
  * Allows 100 requests per 15 minutes per IP
  */
-export const apiLimiter = rateLimit({
+export const apiLimiter: RequestHandler = RATE_LIMIT_DISABLED ? noopMiddleware : rateLimit({
   windowMs: 15 * 60 * 1000, // 15 minutes
   max: 100, // Limit each IP to 100 requests per windowMs
   message: {
@@ -22,12 +29,12 @@ export const apiLimiter = rateLimit({
 });
 
 /**
- * Stricter rate limiter for expensive endpoints (historical data queries)
- * Allows 20 requests per 15 minutes per IP
+ * Rate limiter for data endpoints (historical data queries)
+ * Allows 500 requests per 15 minutes per IP (charting apps need many requests)
  */
-export const strictLimiter = rateLimit({
+export const strictLimiter: RequestHandler = RATE_LIMIT_DISABLED ? noopMiddleware : rateLimit({
   windowMs: 15 * 60 * 1000, // 15 minutes
-  max: 20, // Limit each IP to 20 requests per windowMs
+  max: 500, // Limit each IP to 500 requests per windowMs
   message: {
     error: 'Too many data requests from this IP, please try again later',
     code: 'RATE_LIMIT_EXCEEDED'
@@ -47,7 +54,7 @@ export const strictLimiter = rateLimit({
  * Very permissive rate limiter for health/metrics endpoints
  * Allows 300 requests per 15 minutes per IP
  */
-export const healthLimiter = rateLimit({
+export const healthLimiter: RequestHandler = RATE_LIMIT_DISABLED ? noopMiddleware : rateLimit({
   windowMs: 15 * 60 * 1000, // 15 minutes
   max: 300, // Limit each IP to 300 requests per windowMs
   standardHeaders: true,
